@@ -1,0 +1,16 @@
+{
+  "agent_id": null,
+  "hub_url": "http://HUB-HOST:8787",
+  "hub_user": "",
+  "hub_pass": "",
+
+  "poll_interval_seconds": 3,
+  "idle_poll_interval_seconds": 3,
+  "heartbeat_seconds": 20,
+
+  "whisperjav_bin": "",
+  "allow_browse": true,
+  "log_output_lines": false,
+
+  "path_map": []
+}

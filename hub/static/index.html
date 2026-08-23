@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhisperJAV Fleet</title>
+<style>
+  :root {
+    --bg:#12141a; --panel:#1a1d26; --panel2:#212533; --line:#2c3242;
+    --text:#e6e9f0; --dim:#8b93a7; --accent:#6ea8fe; --ok:#4ade80;
+    --warn:#fbbf24; --err:#f87171; --run:#38bdf8;
+    --radius:10px; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  header {
+    display:flex; align-items:center; gap:16px; padding:14px 20px;
+    background:var(--panel); border-bottom:1px solid var(--line);
+    position:sticky; top:0; z-index:20;
+  }
+  header h1 { font-size:16px; margin:0; font-weight:600; letter-spacing:.3px; }
+  header .spacer { flex:1; }
+  .pill {
+    font-size:11px; padding:2px 9px; border-radius:99px;
+    border:1px solid var(--line); color:var(--dim); text-transform:uppercase;
+    letter-spacing:.5px; white-space:nowrap;
+  }
+  .pill.ok   { color:var(--ok);   border-color:#245b3a; background:#132a1e; }
+  .pill.run  { color:var(--run);  border-color:#1e4d63; background:#0e2733; }
+  .pill.warn { color:var(--warn); border-color:#5c451a; background:#2b2110; }
+  .pill.err  { color:var(--err);  border-color:#5e2626; background:#2c1414; }
+  .pill.off  { color:var(--dim);  border-color:var(--line); }
+
+  main { padding:20px; max-width:1400px; margin:0 auto; display:grid; gap:20px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); }
+  section > h2 {
+    margin:0; padding:12px 16px; font-size:13px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.6px; color:var(--dim);
+    border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px;
+  }
+  section > h2 .spacer { flex:1; }
+  .body { padding:16px; }
+
+  .grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); }
+
+  .card { background:var(--panel2); border:1px solid var(--line); border-radius:var(--radius); padding:14px; }
+  .card h3 { margin:0 0 8px; font-size:14px; display:flex; align-items:center; gap:8px; }
+  .card h3 .spacer { flex:1; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; font-size:12px; color:var(--dim); }
+  .kv b { color:var(--text); font-weight:500; }
+  .mono { font-family:var(--mono); font-size:12px; }
+  .trunc { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  button {
+    background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:7px; padding:6px 12px; font-size:12px; cursor:pointer;
+    font-family:inherit;
+  }
+  button:hover { border-color:var(--accent); color:var(--accent); }
+  button.primary { background:var(--accent); color:#0b1220; border-color:var(--accent); font-weight:600; }
+  button.primary:hover { filter:brightness(1.1); color:#0b1220; }
+  button.danger:hover { border-color:var(--err); color:var(--err); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+
+  label { display:block; font-size:12px; color:var(--dim); margin-bottom:4px; }
+  input[type=text], input[type=number], select, textarea {
+    width:100%; background:var(--bg); color:var(--text); border:1px solid var(--line);
+    border-radius:7px; padding:8px 10px; font-size:13px; font-family:inherit;
+  }
+  textarea { font-family:var(--mono); font-size:12px; line-height:1.5; resize:vertical; }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); }
+  .field { margin-bottom:12px; }
+  .row { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); }
+  .check { display:flex; align-items:center; gap:7px; font-size:13px; color:var(--text); }
+  .check input { width:auto; }
+
+  .bar { height:6px; background:var(--bg); border-radius:99px; overflow:hidden; display:flex; margin:10px 0 6px; }
+  .bar i { display:block; height:100%; }
+  .bar .d { background:var(--ok); } .bar .f { background:var(--err); }
+  .bar .s { background:var(--dim); } .bar .r { background:var(--run); }
+
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  tr:last-child td { border-bottom:none; }
+
+  .log { max-height:280px; overflow-y:auto; font-family:var(--mono); font-size:11.5px; }
+  .log div { padding:3px 16px; border-bottom:1px solid #1e222d; display:flex; gap:10px; }
+  .log .t { color:var(--dim); flex:none; }
+  .log .m { flex:1; word-break:break-word; }
+  .log .error .m { color:var(--err); }
+
+  dialog {
+    background:var(--panel); color:var(--text); border:1px solid var(--line);
+    border-radius:var(--radius); padding:0; max-width:640px; width:92vw;
+  }
+  dialog::backdrop { background:rgba(0,0,0,.65); }
+  dialog h2 { margin:0; padding:14px 16px; font-size:14px; border-bottom:1px solid var(--line); }
+  .picker { max-height:44vh; overflow-y:auto; border:1px solid var(--line); border-radius:7px; }
+  .picker div {
+    padding:7px 12px; cursor:pointer; border-bottom:1px solid #1e222d;
+    font-family:var(--mono); font-size:12px;
+  }
+  .picker div:hover { background:var(--panel2); color:var(--accent); }
+  .empty { color:var(--dim); font-size:13px; padding:6px 0; }
+  .hint { font-size:11px; color:var(--dim); margin-top:4px; }
+  code { font-family:var(--mono); font-size:11px; background:var(--bg); padding:1px 4px; border-radius:4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>WhisperJAV Fleet</h1>
+  <span id="agentSummary" class="pill off">connecting…</span>
+  <div class="spacer"></div>
+  <span id="clock" class="pill off"></span>
+</header>
+
+<main>
+
+  <section>
+    <h2>Machines</h2>
+    <div class="body"><div id="agents" class="grid"></div></div>
+  </section>
+
+  <section>
+    <h2>Jobs<span class="spacer"></span>
+      <button class="primary" onclick="openJob()">New job</button>
+    </h2>
+    <div class="body"><div id="jobs" class="grid"></div></div>
+  </section>
+
+  <section>
+    <h2>Profiles<span class="spacer"></span>
+      <button onclick="openProfile()">New profile</button>
+    </h2>
+    <div class="body" style="padding:0"><div id="profiles"></div></div>
+  </section>
+
+  <section>
+    <h2>Activity</h2>
+    <div id="log" class="log"></div>
+  </section>
+
+</main>
+
+<dialog id="jobDlg">
+  <h2>New job</h2>
+  <div class="body">
+    <div class="field">
+      <label>Target folder</label>
+      <div style="display:flex; gap:8px">
+        <input type="text" id="jTarget" placeholder="path as the worker machines see it">
+        <button onclick="openPicker()" style="flex:none">Browse…</button>
+      </div>
+      <div class="hint">Both machines must see this at the same path, or set <code>path_map</code> in that agent's config.</div>
+    </div>
+
+    <div class="field">
+      <label>Job name <span style="opacity:.6">(optional)</span></label>
+      <input type="text" id="jName" placeholder="defaults to the folder name">
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>Start from profile</label>
+        <select id="jProfile" onchange="applyProfile()"></select>
+      </div>
+      <div class="field">
+        <label>Language code (output suffix)</label>
+        <input type="text" id="jLang" value="qu">
+      </div>
+      <div class="field">
+        <label>Priority <span style="opacity:.6">(lower first)</span></label>
+        <input type="number" id="jPriority" value="100">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>WhisperJAV arguments for this job</label>
+      <textarea id="jArgs" rows="18" spellcheck="false"></textarea>
+      <div class="hint">
+        Must contain <code>{INPUT_FILE}</code>. <code>{TRANSLATE_TITLE}</code>,
+        <code>{TRANSLATE_ACTRESS}</code> and <code>{TRANSLATE_PLOT}</code> are filled from each
+        video's sibling <code>.nfo</code>; a flag is dropped when its value is absent.
+      </div>
+    </div>
+
+    <div class="row">
+      <label class="check"><input type="checkbox" id="jForce"> Force (re-do files that already have an SRT)</label>
+      <label class="check"><input type="checkbox" id="jDry"> Dry run (log the command, run nothing)</label>
+    </div>
+
+    <div class="btns" style="justify-content:flex-end">
+      <button onclick="jobDlg.close()">Cancel</button>
+      <button class="primary" onclick="createJob()">Create &amp; start</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="profDlg">
+  <h2 id="profTitle">Profile</h2>
+  <div class="body">
+    <input type="hidden" id="pId">
+    <div class="row">
+      <div class="field"><label>Name</label><input type="text" id="pName"></div>
+      <div class="field"><label>Language code</label><input type="text" id="pLang" value="qu"></div>
+    </div>
+    <div class="field">
+      <label>Arguments template</label>
+      <textarea id="pArgs" rows="16" spellcheck="false"></textarea>
+    </div>
+    <div class="field">
+      <label>Video extensions <span style="opacity:.6">(comma separated)</span></label>
+      <input type="text" id="pExts">
+    </div>
+    <div class="field"><label>Notes</label><input type="text" id="pNotes"></div>
+    <label class="check"><input type="checkbox" id="pForce"> Force by default</label>
+    <div class="btns" style="justify-content:flex-end">
+      <button onclick="profDlg.close()">Cancel</button>
+      <button class="primary" onclick="saveProfile()">Save</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="pickDlg">
+  <h2>Choose a folder</h2>
+  <div class="body">
+    <div class="row">
+      <div class="field">
+        <label>Browse using machine</label>
+        <select id="pickAgent" onchange="pickGo(document.getElementById('pickPath').value)"></select>
+      </div>
+      <div class="field">
+        <label>Path</label>
+        <input type="text" id="pickPath" onkeydown="if(event.key==='Enter')pickGo(this.value)">
+      </div>
+    </div>
+    <div id="pickList" class="picker"><div class="empty" style="padding:12px">…</div></div>
+    <div class="btns" style="justify-content:flex-end">
+      <button onclick="pickDlg.close()">Cancel</button>
+      <button class="primary" onclick="pickUse()">Use this folder</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+// ---------------------------------------------------------------------------
+// State + helpers
+// ---------------------------------------------------------------------------
+let STATE = { agents: [], jobs: [], events: [], profiles: [] };
+
+const $  = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+async function api(path, method = "GET", body = null) {
+  const opt = { method, headers: { "Content-Type": "application/json" } };
+  if (body !== null) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+function dur(s) {
+  s = Math.floor(s || 0);
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  if (h) return h + "h " + m + "m";
+  if (m) return m + "m " + (s % 60) + "s";
+  return s + "s";
+}
+
+// ---------------------------------------------------------------------------
+// Poll + render
+// ---------------------------------------------------------------------------
+async function refresh() {
+  try {
+    STATE = await api("/api/state");
+    const on = STATE.agents.filter(a => a.online).length;
+    $("agentSummary").className = "pill ok";
+    $("agentSummary").textContent = on + "/" + STATE.agents.length + " online";
+    $("clock").textContent = new Date().toLocaleTimeString();
+    renderAgents(); renderJobs(); renderProfiles(); renderLog();
+  } catch (e) {
+    $("agentSummary").className = "pill err";
+    $("agentSummary").textContent = "hub unreachable";
+  }
+}
+
+function renderAgents() {
+  const el = $("agents");
+  if (!STATE.agents.length) {
+    el.innerHTML = '<div class="empty">No agents have checked in yet. Start ' +
+      '<code>agent.py</code> on a worker machine and it will appear here within a few seconds.</div>';
+    return;
+  }
+  el.innerHTML = STATE.agents.map(a => {
+    const s = a.status || {};
+    const cur = s.current || {};
+    let cls = "off", txt = "offline";
+    if (a.online && a.paused)      { cls = "warn"; txt = "paused"; }
+    else if (a.online && cur.file) { cls = "run";  txt = "working"; }
+    else if (a.online)             { cls = "ok";   txt = "idle"; }
+    const c = s.counts || {};
+    return '<div class="card">' +
+      '<h3>' + esc(a.agent_id) + '<span class="pill ' + cls + '">' + txt + '</span><span class="spacer"></span></h3>' +
+      '<div class="kv">' +
+        '<span>WhisperJAV</span><b class="trunc">' + esc(s.whisperjav || "?") + '</b>' +
+        '<span>Platform</span><b>' + esc(s.platform || "?") + '</b>' +
+        '<span>Last seen</span><b>' + a.last_seen_ago.toFixed(0) + 's ago</b>' +
+        '<span>This run</span><b>' + (c.done||0) + ' done · ' + (c.failed||0) + ' failed · ' + (c.skipped||0) + ' skipped</b>' +
+      '</div>' +
+      (cur.file
+        ? '<div class="kv" style="margin-top:8px">' +
+            '<span>File</span><b class="trunc mono" title="' + esc(cur.file) + '">' + esc(cur.file) + '</b>' +
+            '<span>Job</span><b class="trunc">' + esc(cur.job_name || "") + '</b>' +
+          '</div>' +
+          (s.progress ? '<div class="mono trunc" style="margin-top:6px;color:var(--dim)" title="' +
+             esc(s.progress) + '">' + esc(s.progress) + '</div>' : "")
+        : "") +
+      '<div class="btns">' +
+        '<button onclick="pauseAgent(\'' + esc(a.agent_id) + '\',' + (a.paused ? "false" : "true") + ')">' +
+          (a.paused ? "Resume" : "Pause") + '</button>' +
+        (!a.online ? '<button class="danger" onclick="forgetAgent(\'' + esc(a.agent_id) + '\')">Forget</button>' : "") +
+      '</div></div>';
+  }).join("");
+}
+
+function renderJobs() {
+  const el = $("jobs");
+  if (!STATE.jobs.length) {
+    el.innerHTML = '<div class="empty">No jobs yet. Create one to start transcribing.</div>';
+    return;
+  }
+  const cls = { running:"run", scanning:"run", done:"ok", paused:"warn",
+                stopped:"warn", failed:"err", draft:"off" };
+  el.innerHTML = STATE.jobs.map(j => {
+    const c = j.counts, t = c.total || 1;
+    const pct = n => (100 * n / t).toFixed(2) + "%";
+    const running = (j.state === "running" || j.state === "scanning");
+    return '<div class="card">' +
+      '<h3><span class="trunc" title="' + esc(j.name) + '">' + esc(j.name) + '</span>' +
+        '<span class="pill ' + (cls[j.state] || "off") + '">' + j.state + '</span>' +
+        '<span class="spacer"></span></h3>' +
+      '<div class="mono trunc" style="color:var(--dim)" title="' + esc(j.target_dir) + '">' + esc(j.target_dir) + '</div>' +
+      '<div class="bar">' +
+        '<i class="d" style="width:' + pct(c.done) + '"></i>' +
+        '<i class="r" style="width:' + pct(c.claimed + c.running) + '"></i>' +
+        '<i class="f" style="width:' + pct(c.failed) + '"></i>' +
+        '<i class="s" style="width:' + pct(c.skipped) + '"></i>' +
+      '</div>' +
+      '<div class="kv">' +
+        '<span>Progress</span><b>' + c.finished + '/' + c.total + ' · ' + c.done + ' done · ' +
+          c.failed + ' failed · ' + c.skipped + ' skipped</b>' +
+        '<span>Settings</span><b>.' + esc(j.lang_code) + '.srt' +
+          (j.force ? " · force" : "") + (j.dry_run ? " · dry-run" : "") + '</b>' +
+      '</div>' +
+      (j.active.length
+        ? '<table style="margin-top:10px"><tbody>' + j.active.map(a =>
+            '<tr><td class="mono trunc" style="max-width:230px" title="' + esc(a.rel_path) + '">' + esc(a.rel_path) + '</td>' +
+            '<td style="white-space:nowrap">' + esc(a.claimed_by || "") + '</td>' +
+            '<td style="white-space:nowrap;color:var(--dim)">' + dur(a.elapsed) + '</td></tr>').join("") +
+          '</tbody></table>'
+        : "") +
+      (j.error ? '<div class="mono" style="color:var(--err);margin-top:8px">' + esc(j.error) + '</div>' : "") +
+      '<div class="btns">' +
+        (running
+          ? '<button onclick="jobAct(' + j.id + ',\'pause\')">Pause</button>' +
+            '<button onclick="jobAct(' + j.id + ',\'stop\')">Stop</button>'
+          : '<button class="primary" onclick="jobAct(' + j.id + ',\'' +
+              (j.state === "paused" ? "resume" : "start") + '\')">' +
+              (j.state === "paused" ? "Resume" : (c.total ? "Rescan &amp; run" : "Start")) + '</button>') +
+        (c.failed ? '<button onclick="jobAct(' + j.id + ',\'retry\')">Retry ' + c.failed + ' failed</button>' : "") +
+        '<button onclick="cloneJob(' + j.id + ')">Clone</button>' +
+        '<button class="danger" onclick="jobAct(' + j.id + ',\'reset\')">Reset</button>' +
+        '<button class="danger" onclick="delJob(' + j.id + ')">Delete</button>' +
+      '</div></div>';
+  }).join("");
+}
+
+function renderProfiles() {
+  const el = $("profiles");
+  if (!STATE.profiles.length) { el.innerHTML = '<div class="empty" style="padding:16px">No profiles.</div>'; return; }
+  el.innerHTML = '<table><thead><tr><th>Name</th><th>Lang</th><th>Notes</th><th style="width:150px"></th></tr></thead><tbody>' +
+    STATE.profiles.map(p =>
+      '<tr><td><b>' + esc(p.name) + '</b></td>' +
+      '<td class="mono">.' + esc(p.lang_code) + '.srt</td>' +
+      '<td style="color:var(--dim)">' + esc(p.notes) + '</td>' +
+      '<td style="text-align:right;white-space:nowrap">' +
+        '<button onclick="openProfile(' + p.id + ')">Edit</button> ' +
+        '<button class="danger" onclick="delProfile(' + p.id + ')">Delete</button>' +
+      '</td></tr>').join("") + '</tbody></table>';
+}
+
+function renderLog() {
+  $("log").innerHTML = STATE.events.map(e =>
+    '<div class="' + esc(e.level) + '">' +
+      '<span class="t">' + new Date(e.ts * 1000).toLocaleTimeString() + '</span>' +
+      '<span class="t" style="width:90px">' + esc(e.agent_id || "hub") + '</span>' +
+      '<span class="m">' + esc(e.message) + '</span>' +
+    '</div>').join("");
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+const wrap = fn => async (...a) => {
+  try { await fn(...a); await refresh(); } catch (e) { alert(e.message); }
+};
+
+const jobAct      = wrap((id, action) => api("/api/jobs/" + id + "/action", "POST", { action }));
+const delJob      = wrap(id => confirm("Delete this job and its queue?") ? api("/api/jobs/" + id, "DELETE") : null);
+const pauseAgent  = wrap((id, p) => api("/api/agents/" + id + "/pause", "POST", { paused: p }));
+const forgetAgent = wrap(id => api("/api/agents/" + id, "DELETE"));
+const delProfile  = wrap(id => confirm("Delete this profile?") ? api("/api/profiles/" + id, "DELETE") : null);
+
+// -- Job dialog --------------------------------------------------------------
+function openJob(preset) {
+  $("jProfile").innerHTML = '<option value="">— none (use the box below) —</option>' +
+    STATE.profiles.map(x => '<option value="' + x.id + '">' + esc(x.name) + '</option>').join("");
+
+  if (preset) {
+    $("jTarget").value   = preset.target_dir;
+    $("jName").value     = preset.name || "";
+    $("jArgs").value     = preset.args_template;
+    $("jLang").value     = preset.lang_code;
+    $("jForce").checked  = preset.force;
+    $("jDry").checked    = preset.dry_run;
+    $("jPriority").value = preset.priority;
+    $("jProfile").value  = preset.profile_id || "";
+  } else {
+    $("jTarget").value = ""; $("jName").value = "";
+    $("jForce").checked = false; $("jDry").checked = false;
+    $("jPriority").value = 100;
+    if (STATE.profiles.length) { $("jProfile").value = STATE.profiles[0].id; applyProfile(); }
+  }
+  $("jobDlg").showModal();
+}
+
+function applyProfile() {
+  const p = STATE.profiles.find(x => x.id == $("jProfile").value);
+  if (!p) return;
+  $("jArgs").value = p.args_template;
+  $("jLang").value = p.lang_code;
+  $("jForce").checked = p.force;
+}
+
+function cloneJob(id) {
+  const j = STATE.jobs.find(x => x.id === id);
+  if (j) openJob(Object.assign({}, j, { name: "" }));
+}
+
+const createJob = wrap(async () => {
+  const body = {
+    name: $("jName").value.trim(),
+    target_dir: $("jTarget").value.trim(),
+    profile_id: $("jProfile").value ? Number($("jProfile").value) : null,
+    args_template: $("jArgs").value,
+    lang_code: $("jLang").value.trim() || "qu",
+    force: $("jForce").checked,
+    dry_run: $("jDry").checked,
+    priority: Number($("jPriority").value) || 100,
+    start: true
+  };
+  if (!body.target_dir) throw new Error("A target folder is required.");
+  await api("/api/jobs", "POST", body);
+  $("jobDlg").close();
+});
+
+// -- Profile dialog ----------------------------------------------------------
+function openProfile(id) {
+  const p = STATE.profiles.find(x => x.id === id);
+  const first = STATE.profiles[0];
+  $("profTitle").textContent = p ? "Edit profile: " + p.name : "New profile";
+  $("pId").value    = p ? p.id : "";
+  $("pName").value  = p ? p.name : "";
+  $("pLang").value  = p ? p.lang_code : "qu";
+  $("pArgs").value  = p ? p.args_template : (first ? first.args_template : "");
+  $("pExts").value  = (p ? p.video_extensions : (first ? first.video_extensions : [])).join(", ");
+  $("pNotes").value = p ? p.notes : "";
+  $("pForce").checked = p ? p.force : false;
+  $("profDlg").showModal();
+}
+
+const saveProfile = wrap(async () => {
+  const body = {
+    name: $("pName").value.trim(),
+    args_template: $("pArgs").value,
+    lang_code: $("pLang").value.trim() || "qu",
+    force: $("pForce").checked,
+    video_extensions: $("pExts").value.split(",").map(s => s.trim()).filter(Boolean),
+    notes: $("pNotes").value.trim()
+  };
+  if (!body.name) throw new Error("A profile name is required.");
+  const id = $("pId").value;
+  await (id ? api("/api/profiles/" + id, "PUT", body) : api("/api/profiles", "POST", body));
+  $("profDlg").close();
+});
+
+// -- Folder picker -----------------------------------------------------------
+// The hub has no view of the media filesystem, so listings come from a worker
+// agent: we park a request and the agent answers it on its next poll.
+function openPicker() {
+  const online = STATE.agents.filter(a => a.online);
+  if (!online.length) { alert("No agent is online to browse with."); return; }
+  $("pickAgent").innerHTML = online.map(a =>
+    '<option value="' + esc(a.agent_id) + '">' + esc(a.agent_id) + '</option>').join("");
+  $("pickDlg").showModal();
+  pickGo($("jTarget").value.trim());
+}
+
+async function pickGo(path) {
+  $("pickPath").value = path;
+  $("pickList").innerHTML = '<div class="empty" style="padding:12px">asking ' +
+    esc($("pickAgent").value) + '…</div>';
+  try {
+    const started = await api("/api/browse", "POST", { agent_id: $("pickAgent").value, path: path });
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 400));
+      const res = await api("/api/browse/" + started.request_id);
+      if (res.state === "done" || res.state === "error") {
+        if (res.error) {
+          $("pickList").innerHTML = '<div class="empty" style="padding:12px;color:var(--err)">' + esc(res.error) + '</div>';
+          return;
+        }
+        const rows = (res.entries || []).map(e =>
+          '<div onclick="pickGo(' + esc(JSON.stringify(e.path)) + ')">' +
+            (e.name === ".." ? "↰" : "📁") + " " + esc(e.name) + '</div>').join("");
+        $("pickList").innerHTML = rows || '<div class="empty" style="padding:12px">No subfolders here.</div>';
+        return;
+      }
+    }
+    $("pickList").innerHTML = '<div class="empty" style="padding:12px">Agent did not answer in time.</div>';
+  } catch (e) {
+    $("pickList").innerHTML = '<div class="empty" style="padding:12px;color:var(--err)">' + esc(e.message) + '</div>';
+  }
+}
+
+function pickUse() {
+  $("jTarget").value = $("pickPath").value;
+  $("pickDlg").close();
+}
+
+// ---------------------------------------------------------------------------
+refresh();
+setInterval(refresh, 2500);
+</script>
+</body>
+</html>

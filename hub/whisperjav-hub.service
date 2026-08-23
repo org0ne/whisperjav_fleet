@@ -1,0 +1,31 @@
+# WhisperJAV fleet hub.
+#   sudo cp whisperjav-hub.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-hub
+#
+# Edit User=, WorkingDirectory= and the credentials before enabling.
+[Unit]
+Description=WhisperJAV Fleet Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=whisperjav
+WorkingDirectory=/opt/whisperjav-fleet/hub
+Environment=HUB_USER=changeme
+Environment=HUB_PASS=changeme
+Environment=HUB_DB_PATH=/var/lib/whisperjav-fleet/hub.sqlite3
+ExecStart=/opt/whisperjav-fleet/hub/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8787
+Restart=always
+RestartSec=5
+
+# The hub only ever touches its own database -- it needs no media access.
+StateDirectory=whisperjav-fleet
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/whisperjav-fleet
+
+[Install]
+WantedBy=multi-user.target
