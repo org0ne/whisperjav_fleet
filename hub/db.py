@@ -57,6 +57,7 @@ def configure(db_path: Path) -> None:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         _create_schema(conn)
+        _migrate_schema(conn)
 
 
 def connect() -> sqlite3.Connection:
@@ -108,6 +109,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             state            TEXT NOT NULL DEFAULT 'draft',
             priority         INTEGER NOT NULL DEFAULT 100,
             dry_run          INTEGER NOT NULL DEFAULT 0,
+            agent_allowlist  TEXT NOT NULL DEFAULT '[]',
             scan_agent       TEXT,
             scan_started_at  REAL,
             error            TEXT NOT NULL DEFAULT '',
@@ -163,6 +165,13 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a database's first `CREATE TABLE` ran."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "agent_allowlist" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN agent_allowlist TEXT NOT NULL DEFAULT '[]'")
+
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -173,6 +182,12 @@ def now() -> float:
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict]:
     return dict(row) if row is not None else None
+
+
+def agent_allowed(allowlist_json: Optional[str], agent_id: str) -> bool:
+    """Empty allowlist ([] or '') means unrestricted -- any agent may claim."""
+    allowlist = json.loads(allowlist_json) if allowlist_json else []
+    return not allowlist or agent_id in allowlist
 
 
 def log_event(conn: sqlite3.Connection, message: str, *,
@@ -231,17 +246,30 @@ def claim_next(agent_id: str, *, lease_seconds: int = CLAIM_LEASE_SECONDS) -> Op
             try:
                 release_expired_claims(conn)
 
-                row = conn.execute(
+                # Fetch a batch rather than the single front-of-queue item so
+                # an `agent_allowlist` restriction can be applied in Python:
+                # SQLite's JSON1 extension isn't guaranteed present, and the
+                # rest of this codebase already treats these list columns as
+                # opaque JSON blobs handled at the application layer. The
+                # batch size just needs to comfortably exceed the number of
+                # routed-elsewhere items that could be queued ahead of this
+                # agent's next eligible one.
+                candidates = conn.execute(
                     """
-                    SELECT wi.id, wi.job_id, wi.rel_path, wi.attempts
+                    SELECT wi.id, wi.job_id, wi.rel_path, wi.attempts, j.agent_allowlist
                       FROM work_items wi
                       JOIN jobs j ON j.id = wi.job_id
                      WHERE wi.state = 'pending'
                        AND j.state = 'running'
                      ORDER BY j.priority ASC, j.id ASC, wi.id ASC
-                     LIMIT 1
+                     LIMIT 500
                     """
-                ).fetchone()
+                ).fetchall()
+
+                row = next(
+                    (r for r in candidates if agent_allowed(r["agent_allowlist"], agent_id)),
+                    None,
+                )
 
                 if row is None:
                     conn.execute("COMMIT")

@@ -151,6 +151,11 @@ class JobIn(BaseModel):
     priority: int = 100
     dry_run: bool = False
     start: bool = True
+    agent_allowlist: list[str] = Field(default_factory=list)   # empty = any agent
+
+
+class JobAgents(BaseModel):
+    agent_allowlist: list[str] = Field(default_factory=list)
 
 
 class ItemDone(BaseModel):
@@ -246,14 +251,18 @@ def agent_checkin(agent_id: str, status: dict, _a=Auth):
                 """,
                 (now - SCAN_TIMEOUT_SECONDS,),
             )
-            job = conn.execute(
+            waiting = conn.execute(
                 """
-                SELECT id, target_dir, lang_code, force, video_extensions
+                SELECT id, target_dir, lang_code, force, video_extensions, agent_allowlist
                   FROM jobs
                  WHERE state = 'scanning' AND scan_agent IS NULL
-                 ORDER BY priority ASC, id ASC LIMIT 1
+                 ORDER BY priority ASC, id ASC LIMIT 50
                 """
-            ).fetchone()
+            ).fetchall()
+            job = next(
+                (j for j in waiting if db.agent_allowed(j["agent_allowlist"], agent_id)),
+                None,
+            )
             if job:
                 conn.execute(
                     "UPDATE jobs SET scan_agent = ?, scan_started_at = ?, updated_at = ? WHERE id = ?",
@@ -423,6 +432,7 @@ def get_state(_a=Auth):
             job["force"]   = bool(job["force"])
             job["dry_run"] = bool(job["dry_run"])
             job["video_extensions"] = json.loads(job["video_extensions"] or "[]")
+            job["agent_allowlist"] = json.loads(job["agent_allowlist"] or "[]")
             job["counts"] = db.job_counts(conn, row["id"])
             job["active"] = [
                 {
@@ -513,19 +523,40 @@ def create_job(job: JobIn, _a=Auth):
             """
             INSERT INTO jobs
                 (name, target_dir, profile_id, profile_name, args_template, lang_code,
-                 force, video_extensions, state, priority, dry_run, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 force, video_extensions, state, priority, dry_run, agent_allowlist,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name, target, job.profile_id, prof["name"] if prof else "",
                 args_template, lang_code, int(force), json.dumps(exts),
                 "scanning" if job.start else "draft",
-                job.priority, int(job.dry_run), now, now,
+                job.priority, int(job.dry_run), json.dumps(job.agent_allowlist),
+                now, now,
             ),
         )
         job_id = cur.lastrowid
         db.log_event(conn, f"Job created: {name} -> {target}", job_id=job_id)
     return {"ok": True, "job_id": job_id}
+
+
+@app.post("/api/jobs/{job_id}/agents")
+def set_job_agents(job_id: int, body: JobAgents, _a=Auth):
+    """Restrict (or unrestrict) which agents may claim this job's items."""
+    now = db.now()
+    with db.connect() as conn:
+        cur = conn.execute(
+            "UPDATE jobs SET agent_allowlist = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(body.agent_allowlist), now, job_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "no such job")
+        db.log_event(
+            conn,
+            "Agents restricted to: " + (", ".join(body.agent_allowlist) or "any"),
+            job_id=job_id,
+        )
+    return {"ok": True}
 
 
 @app.post("/api/jobs/{job_id}/action")

@@ -124,6 +124,15 @@ sweep would silently no-op.
   prejudice (pause/stop), leaving the item `pending` and no marker.
 - A lost completion report is safe by design: the lease expires and the item
   returns to the pool, costing a re-run at worst.
+- **`jobs.agent_allowlist`** (JSON array of agent IDs, `[]` = unrestricted)
+  gates both `db.claim_next()` and the scan handout in `agent_checkin`. Since
+  SQLite's JSON1 extension isn't guaranteed present, matching happens in
+  Python (`db.agent_allowed`) against a batch of candidate rows rather than
+  in the SQL `WHERE` — `claim_next` fetches up to 500 pending items in
+  priority/id order and picks the first one this agent is allowed to run,
+  still inside the same `BEGIN IMMEDIATE` transaction as the CAS update, so
+  the primary claim guard (layer 1 above) is unchanged. A job with an empty
+  allowlist behaves exactly as before.
 
 ### Constraints to preserve
 

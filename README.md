@@ -162,6 +162,12 @@ repeatedly and it only picks up what is new.
 **Folder picker.** "Browse…" lists directories *as a chosen worker sees them*,
 since the hub has no mount of its own.
 
+**Agent routing.** By default any online, unpaused agent may claim any file
+from any running job. To dedicate a job to specific machines, set "Restrict
+to agents" when creating it (or click **Agents…** on an existing job) to a
+comma-separated list of agent IDs — every other agent then skips that job's
+queue entirely. Leave it blank for the default shared-queue behaviour.
+
 ---
 
 ## Output, per video

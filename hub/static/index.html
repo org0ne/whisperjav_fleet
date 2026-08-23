@@ -165,6 +165,12 @@
       <input type="text" id="jName" placeholder="defaults to the folder name">
     </div>
 
+    <div class="field">
+      <label>Restrict to agents <span style="opacity:.6">(comma separated, blank = any online agent)</span></label>
+      <input type="text" id="jAgents" list="jAgentsList" placeholder="e.g. debeast, box2">
+      <datalist id="jAgentsList"></datalist>
+    </div>
+
     <div class="row">
       <div class="field">
         <label>Start from profile</label>
@@ -362,6 +368,7 @@ function renderJobs() {
           c.failed + ' failed · ' + c.skipped + ' skipped</b>' +
         '<span>Settings</span><b>.' + esc(j.lang_code) + '.srt' +
           (j.force ? " · force" : "") + (j.dry_run ? " · dry-run" : "") + '</b>' +
+        '<span>Agents</span><b>' + (j.agent_allowlist.length ? esc(j.agent_allowlist.join(", ")) : "any") + '</b>' +
       '</div>' +
       (j.active.length
         ? '<table style="margin-top:10px"><tbody>' + j.active.map(a =>
@@ -379,6 +386,7 @@ function renderJobs() {
               (j.state === "paused" ? "resume" : "start") + '\')">' +
               (j.state === "paused" ? "Resume" : (c.total ? "Rescan &amp; run" : "Start")) + '</button>') +
         (c.failed ? '<button onclick="jobAct(' + j.id + ',\'retry\')">Retry ' + c.failed + ' failed</button>' : "") +
+        '<button onclick="editJobAgents(' + j.id + ')">Agents…</button>' +
         '<button onclick="cloneJob(' + j.id + ')">Clone</button>' +
         '<button class="danger" onclick="jobAct(' + j.id + ',\'reset\')">Reset</button>' +
         '<button class="danger" onclick="delJob(' + j.id + ')">Delete</button>' +
@@ -426,6 +434,8 @@ const delProfile  = wrap(id => confirm("Delete this profile?") ? api("/api/profi
 function openJob(preset) {
   $("jProfile").innerHTML = '<option value="">— none (use the box below) —</option>' +
     STATE.profiles.map(x => '<option value="' + x.id + '">' + esc(x.name) + '</option>').join("");
+  $("jAgentsList").innerHTML = STATE.agents.map(a =>
+    '<option value="' + esc(a.agent_id) + '">').join("");
 
   if (preset) {
     $("jTarget").value   = preset.target_dir;
@@ -436,8 +446,9 @@ function openJob(preset) {
     $("jDry").checked    = preset.dry_run;
     $("jPriority").value = preset.priority;
     $("jProfile").value  = preset.profile_id || "";
+    $("jAgents").value   = (preset.agent_allowlist || []).join(", ");
   } else {
-    $("jTarget").value = ""; $("jName").value = "";
+    $("jTarget").value = ""; $("jName").value = ""; $("jAgents").value = "";
     $("jForce").checked = false; $("jDry").checked = false;
     $("jPriority").value = 100;
     if (STATE.profiles.length) { $("jProfile").value = STATE.profiles[0].id; applyProfile(); }
@@ -458,6 +469,18 @@ function cloneJob(id) {
   if (j) openJob(Object.assign({}, j, { name: "" }));
 }
 
+const editJobAgents = wrap(id => {
+  const j = STATE.jobs.find(x => x.id === id);
+  if (!j) return;
+  const input = prompt(
+    "Restrict this job to which agents? Comma separated, blank = any online agent.",
+    j.agent_allowlist.join(", ")
+  );
+  if (input === null) return;
+  const agent_allowlist = input.split(",").map(s => s.trim()).filter(Boolean);
+  return api("/api/jobs/" + id + "/agents", "POST", { agent_allowlist });
+});
+
 const createJob = wrap(async () => {
   const body = {
     name: $("jName").value.trim(),
@@ -468,6 +491,7 @@ const createJob = wrap(async () => {
     force: $("jForce").checked,
     dry_run: $("jDry").checked,
     priority: Number($("jPriority").value) || 100,
+    agent_allowlist: $("jAgents").value.split(",").map(s => s.trim()).filter(Boolean),
     start: true
   };
   if (!body.target_dir) throw new Error("A target folder is required.");
