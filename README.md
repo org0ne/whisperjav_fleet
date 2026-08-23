@@ -68,8 +68,12 @@ check — sees either the complete file or no file, never a half-written one.
 
 Needs Python 3.10+ and nothing else. No media mount, no GPU.
 
+The repo is private, so cloning it on a new machine needs GitHub credentials
+(`gh auth login`, or an SSH deploy key) — same requirement on every agent
+machine below.
+
 ```bash
-git clone <this repo> /opt/whisperjav-fleet
+git clone https://github.com/org0ne/whisperjav_fleet.git /opt/whisperjav-fleet
 cd /opt/whisperjav-fleet/hub
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
@@ -95,6 +99,9 @@ sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-hub
 needs WhisperJAV on the machine and access to the media share.
 
 ```bash
+git clone https://github.com/org0ne/whisperjav_fleet.git /opt/whisperjav-fleet
+cd /opt/whisperjav-fleet
+
 sudo mkdir -p /etc/whisperjav-agent
 sudo cp agent/config.example.json /etc/whisperjav-agent/config.json
 sudo nano /etc/whisperjav-agent/config.json     # set hub_url
