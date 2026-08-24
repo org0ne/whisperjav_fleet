@@ -305,10 +305,19 @@ def agent_claim(agent_id: str, _a=Auth):
 def agent_heartbeat(agent_id: str, beat: ItemBeat, _a=Auth):
     """
     Extend the claim lease.  Also the channel that tells a busy agent to give
-    up: if the job was paused or stopped from the dashboard, `abort` comes
-    back true and the agent kills the in-flight whisperjav process.
+    up: `abort` comes back true if the job was paused/stopped from the
+    dashboard, or if this specific agent was Stopped -- either way the agent
+    kills the in-flight whisperjav process.
     """
     with db.connect() as conn:
+        # One-shot: consume the Stop request the instant it's seen, so it
+        # can't also abort whatever this agent claims next after resuming.
+        cur = conn.execute(
+            "UPDATE agents SET abort_requested = 0 WHERE agent_id = ? AND abort_requested = 1",
+            (agent_id,),
+        )
+        stopped = cur.rowcount > 0
+
         job = conn.execute(
             """
             SELECT j.state FROM jobs j
@@ -319,6 +328,8 @@ def agent_heartbeat(agent_id: str, beat: ItemBeat, _a=Auth):
         ).fetchone()
         if job is None:
             return {"ok": False, "abort": True, "reason": "unknown item"}
+        if stopped:
+            return {"ok": True, "abort": True, "reason": "stopped from dashboard"}
         if job["state"] != "running":
             return {"ok": True, "abort": True, "reason": f"job is {job['state']}"}
 
@@ -662,8 +673,35 @@ def delete_job(job_id: int, _a=Auth):
 def pause_agent(agent_id: str, body: dict, _a=Auth):
     paused = bool((body or {}).get("paused", True))
     with db.connect() as conn:
-        conn.execute("UPDATE agents SET paused = ? WHERE agent_id = ?", (int(paused), agent_id))
+        if paused:
+            conn.execute("UPDATE agents SET paused = 1 WHERE agent_id = ?", (agent_id,))
+        else:
+            # Resuming always clears any stale Stop request: if the agent was
+            # idle when Stopped, there was no in-flight heartbeat to consume
+            # it, and it must not fire against whatever this agent claims next.
+            conn.execute(
+                "UPDATE agents SET paused = 0, abort_requested = 0 WHERE agent_id = ?",
+                (agent_id,),
+            )
         db.log_event(conn, f"Agent {'paused' if paused else 'resumed'}", agent_id=agent_id)
+    return {"ok": True}
+
+
+@app.post("/api/agents/{agent_id}/stop")
+def stop_agent(agent_id: str, _a=Auth):
+    """
+    Pause this agent and abort whatever it is working on right now, rather
+    than letting the current file finish first -- e.g. to reclaim its GPU
+    for something else immediately.
+    """
+    with db.connect() as conn:
+        cur = conn.execute(
+            "UPDATE agents SET paused = 1, abort_requested = 1 WHERE agent_id = ?",
+            (agent_id,),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "no such agent")
+        db.log_event(conn, "Stop requested (immediate)", agent_id=agent_id)
     return {"ok": True}
 
 

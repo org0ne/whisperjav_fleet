@@ -149,11 +149,19 @@ batch script's current recipe is seeded as `qwen-galgame-translate`. The
 arguments are *snapshotted onto the job at creation*, so editing a profile
 later never changes a job already queued.
 
-**Pause / Stop.** WhisperJAV cannot resume a partial transcription, so Pause
-kills the in-flight process — along with the helpers it spawned, via its
+**Pause / Stop (job).** WhisperJAV cannot resume a partial transcription, so
+Pause kills the in-flight process — along with the helpers it spawned, via its
 process group, so nothing is left holding GPU memory — and returns the file to
 the queue. Nothing partial is written, so restarting is always safe. Stop does
 the same and requeues everything unfinished.
+
+**Pause / Stop now (machine).** Each machine on the **Machines** panel has its
+own, separate controls. **Pause** just stops that agent from picking up new
+files — whatever it's already transcribing keeps running to completion.
+**Stop now** is immediate: it aborts the current file right away (same clean
+requeue as above, nothing partial written) and pauses the agent, freeing its
+GPU without waiting for that file to finish — handy when you need the compute
+for something else. Click **Resume** when you want it back in the pool.
 
 **Re-running is free.** A rescan skips any video that already has its
 `.<lang>.srt`, exactly like the batch script. Point a job at a large tree

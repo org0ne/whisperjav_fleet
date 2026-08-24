@@ -77,11 +77,12 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS agents (
-            agent_id     TEXT PRIMARY KEY,
-            status_json  TEXT NOT NULL DEFAULT '{}',
-            last_seen    REAL NOT NULL DEFAULT 0,
-            paused       INTEGER NOT NULL DEFAULT 0,
-            first_seen   REAL NOT NULL DEFAULT 0
+            agent_id         TEXT PRIMARY KEY,
+            status_json      TEXT NOT NULL DEFAULT '{}',
+            last_seen        REAL NOT NULL DEFAULT 0,
+            paused           INTEGER NOT NULL DEFAULT 0,
+            abort_requested  INTEGER NOT NULL DEFAULT 0,
+            first_seen       REAL NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS profiles (
@@ -167,9 +168,13 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     """Add columns introduced after a database's first `CREATE TABLE` ran."""
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
-    if "agent_allowlist" not in cols:
+    job_cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "agent_allowlist" not in job_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN agent_allowlist TEXT NOT NULL DEFAULT '[]'")
+
+    agent_cols = {row["name"] for row in conn.execute("PRAGMA table_info(agents)")}
+    if "abort_requested" not in agent_cols:
+        conn.execute("ALTER TABLE agents ADD COLUMN abort_requested INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------------------------------------------------------------------------

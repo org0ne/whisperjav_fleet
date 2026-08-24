@@ -97,7 +97,11 @@ Three concerns, deliberately separated in `agent/agent.py`:
 - **Work loop** (`run`) — scan, claim, process. Never calls `checkin`.
 - **Per-item heartbeat thread** (inside `_run_one`) — refreshes the lease, touches
   the lock's mtime, and watches for `abort` in the heartbeat response. `abort` is
-  how a dashboard Pause/Stop reaches an in-flight transcription.
+  how a dashboard Pause/Stop reaches an in-flight transcription — either because
+  the *job* was paused/stopped, or because this specific *agent* was Stopped
+  (see below). Either way `runner.run_whisperjav`'s `should_abort` check picks
+  it up and kills the process group; `_run_one` treats an aborted run as a
+  clean requeue, not a failure.
 
 `runner._terminate_tree` kills the child's whole **process group** (children are
 spawned with `start_new_session=True`), because WhisperJAV spawns helpers that
@@ -145,6 +149,16 @@ sweep would silently no-op.
   what makes starvation structurally impossible rather than merely unlikely.
   All of it stays inside the same `BEGIN IMMEDIATE` transaction as the CAS
   update, so the primary claim guard (layer 1 above) is unchanged.
+- **`agents.abort_requested`** is the immediate per-agent Stop (distinct from
+  per-agent Pause, which only blocks future claims and lets the current file
+  finish). `POST /api/agents/{id}/stop` sets both `paused` and
+  `abort_requested`; `agent_heartbeat` consumes the flag **one-shot** — it
+  clears it the instant any heartbeat from that agent arrives, so it can only
+  ever abort the file in flight *right now*, never a later one. The
+  `paused = 0, abort_requested = 0` resume path in `pause_agent` is a second
+  safety net for the case where Stop was clicked on an idle agent: with no
+  in-flight heartbeat to consume it there, a stale flag would otherwise
+  detonate against whatever that agent claims next.
 
 ### Constraints to preserve
 

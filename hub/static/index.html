@@ -370,6 +370,9 @@ function renderAgents() {
       '<div class="btns">' +
         '<button onclick="pauseAgent(\'' + esc(a.agent_id) + '\',' + (a.paused ? "false" : "true") + ')">' +
           (a.paused ? "Resume" : "Pause") + '</button>' +
+        (a.online && cur.file
+          ? '<button class="danger" onclick="stopAgent(\'' + esc(a.agent_id) + '\')">Stop now</button>'
+          : "") +
         (!a.online ? '<button class="danger" onclick="forgetAgent(\'' + esc(a.agent_id) + '\')">Forget</button>' : "") +
       '</div></div>';
   }).join("");
@@ -466,6 +469,8 @@ const jobAct      = wrap((id, action) => api("/api/jobs/" + id + "/action", "POS
 const delJob      = wrap(id => confirm("Delete this job and its queue?") ? api("/api/jobs/" + id, "DELETE") : null);
 const pauseAgent  = wrap((id, p) => api("/api/agents/" + id + "/pause", "POST", { paused: p }));
 const forgetAgent = wrap(id => api("/api/agents/" + id, "DELETE"));
+const stopAgent   = wrap(id => confirm("Stop " + id + " now? Its current file will be aborted " +
+  "and requeued, and the agent will pause until you resume it.") ? api("/api/agents/" + id + "/stop", "POST") : null);
 const delProfile  = wrap(id => confirm("Delete this profile?") ? api("/api/profiles/" + id, "DELETE") : null);
 
 // -- Job dialog --------------------------------------------------------------
