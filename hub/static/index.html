@@ -62,13 +62,13 @@
   button:hover { border-color:var(--accent); color:var(--accent); }
   button.primary { background:var(--accent); color:#0b1220; border-color:var(--accent); font-weight:600; }
   button.primary:hover { filter:brightness(1.1); color:#0b1220; }
-  /* Subtle tints, echoing the .pill palette above -- a hint of intent at
-     rest (caution, destructive, affirmative, informational), not a solid
-     fill like .primary. */
-  button.warn   { color:var(--warn); border-color:#5c451a; background:#2b2110; }
-  button.danger { color:var(--err);  border-color:#5e2626; background:#2c1414; }
-  button.ok     { color:var(--ok);   border-color:#245b3a; background:#132a1e; }
-  button.info   { color:var(--run);  border-color:#1e4d63; background:#0e2733; }
+  /* A hint of intent at rest (caution, destructive, affirmative,
+     informational) via outline + text only -- background stays neutral,
+     unlike the solid fill of .primary. */
+  button.warn   { color:var(--warn); border-color:var(--warn); }
+  button.danger { color:var(--err);  border-color:var(--err); }
+  button.ok     { color:var(--ok);   border-color:var(--ok); }
+  button.info   { color:var(--run);  border-color:var(--run); }
   button.warn:hover, button.danger:hover, button.ok:hover, button.info:hover { filter:brightness(1.25); }
   button:disabled { opacity:.4; cursor:not-allowed; }
   .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
