@@ -244,17 +244,38 @@ class Agent:
                 backoff = min(backoff * 2, 30.0)
                 continue
 
-            self._paused = bool(directives.get("paused"))
-
-            if directives.get("browse") and self.cfg.get("allow_browse", True):
-                self._handle_browse(directives["browse"])
-
-            # Only take a scan while idle -- scanning a large tree from a
-            # machine that is mid-transcription just delays both.
-            if directives.get("scan") and not self.current and self._pending_scan is None:
-                self._pending_scan = directives["scan"]
-
+            self._apply_directives(directives)
             self.shutdown.wait(interval)
+
+    def _apply_directives(self, directives: dict) -> None:
+        self._paused = bool(directives.get("paused"))
+
+        if directives.get("browse") and self.cfg.get("allow_browse", True):
+            self._handle_browse(directives["browse"])
+
+        # Only take a scan while idle -- scanning a large tree from a
+        # machine that is mid-transcription just delays both.
+        if directives.get("scan") and not self.current and self._pending_scan is None:
+            self._pending_scan = directives["scan"]
+
+    def _check_in_now_idle(self) -> None:
+        """
+        Called from the main loop the instant an item finishes, while
+        `self.current` is guaranteed already cleared. The presence thread
+        only samples idleness once every `poll_interval_seconds`, which on a
+        continuously busy agent (back-to-back items, near-zero gap between
+        them) almost never lands during that brief idle window -- starving
+        any waiting scan job indefinitely even though it outranks everything
+        else in the queue. This closes that race with a synchronous check-in
+        at the one moment idleness is certain.
+        """
+        if self._paused or not self._connected.is_set():
+            return
+        try:
+            directives = self.hub.checkin(self.status())
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+            return
+        self._apply_directives(directives)
 
     def run(self, once: bool = False) -> int:
         log(f"agent '{self.agent_id}' starting")
@@ -286,6 +307,7 @@ class Agent:
                 if item:
                     self._process(item)
                     did_work = True
+                    self._check_in_now_idle()
 
             if once:
                 break
