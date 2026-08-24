@@ -140,14 +140,14 @@
 
   <section>
     <h2>Jobs<span class="spacer"></span>
-      <button class="primary" onclick="openJob()">New job</button>
+      <button class="primary" title="Create a job: a target folder plus the WhisperJAV arguments to run against it." onclick="openJob()">New job</button>
     </h2>
     <div class="body"><div id="jobs" class="grid"></div></div>
   </section>
 
   <section>
     <h2>Profiles<span class="spacer"></span>
-      <button onclick="openProfile()">New profile</button>
+      <button title="Save a new named starting point for job arguments." onclick="openProfile()">New profile</button>
     </h2>
     <div class="body" style="padding:0"><div id="profiles"></div></div>
   </section>
@@ -379,12 +379,15 @@ function renderAgents() {
              esc(s.progress) + '">' + esc(s.progress) + '</div>' : "")
         : "") +
       '<div class="btns">' +
-        '<button class="' + (a.paused ? "ok" : "warn") + '" onclick="pauseAgent(\'' + esc(a.agent_id) + '\',' + (a.paused ? "false" : "true") + ')">' +
+        '<button class="' + (a.paused ? "ok" : "warn") + '" title="' + (a.paused
+            ? "Let this agent resume claiming files."
+            : "Stop this agent from claiming new files; the one in progress finishes normally.") +
+          '" onclick="pauseAgent(\'' + esc(a.agent_id) + '\',' + (a.paused ? "false" : "true") + ')">' +
           (a.paused ? "Resume" : "Pause") + '</button>' +
         (a.online && cur.file
-          ? '<button class="danger" onclick="stopAgent(\'' + esc(a.agent_id) + '\')">Stop now</button>'
+          ? '<button class="danger" title="Abort the file this agent is working on right now and pause it, freeing its GPU immediately." onclick="stopAgent(\'' + esc(a.agent_id) + '\')">Stop now</button>'
           : "") +
-        (!a.online ? '<button class="danger" onclick="forgetAgent(\'' + esc(a.agent_id) + '\')">Forget</button>' : "") +
+        (!a.online ? '<button class="danger" title="Remove this offline agent from the dashboard; it reappears if it checks in again." onclick="forgetAgent(\'' + esc(a.agent_id) + '\')">Forget</button>' : "") +
       '</div></div>';
   }).join("");
 }
@@ -431,17 +434,22 @@ function renderJobs() {
       (j.error ? '<div class="mono" style="color:var(--err);margin-top:8px">' + esc(j.error) + '</div>' : "") +
       '<div class="btns">' +
         (running
-          ? '<button class="warn" onclick="jobAct(' + j.id + ',\'pause\')">Pause</button>' +
-            '<button class="danger" onclick="jobAct(' + j.id + ',\'stop\')">Stop</button>'
-          : '<button class="primary" onclick="jobAct(' + j.id + ',\'' +
+          ? '<button class="warn" title="Abort every file in progress for this job and pause it; nothing partial is written." onclick="jobAct(' + j.id + ',\'pause\')">Pause</button>' +
+            '<button class="danger" title="Same as Pause, and also requeues everything not yet finished." onclick="jobAct(' + j.id + ',\'stop\')">Stop</button>'
+          : '<button class="primary" title="' + (j.state === "paused"
+                ? "Continue this job without rescanning the folder."
+                : c.total
+                  ? "Scan for new files (skipping ones already done) and keep running."
+                  : "Scan the target folder and begin processing.") +
+              '" onclick="jobAct(' + j.id + ',\'' +
               (j.state === "paused" ? "resume" : "start") + '\')">' +
               (j.state === "paused" ? "Resume" : (c.total ? "Rescan &amp; run" : "Start")) + '</button>') +
-        (c.failed ? '<button class="warn" onclick="jobAct(' + j.id + ',\'retry\')">Retry ' + c.failed + ' failed</button>' : "") +
-        '<button class="info" onclick="editJobAgents(' + j.id + ')">Agents…</button>' +
-        '<button class="info" onclick="openPriority(' + j.id + ')">Priority…</button>' +
-        '<button class="info" onclick="cloneJob(' + j.id + ')">Clone</button>' +
-        '<button class="danger" onclick="jobAct(' + j.id + ',\'reset\')">Reset</button>' +
-        '<button class="danger" onclick="delJob(' + j.id + ')">Delete</button>' +
+        (c.failed ? '<button class="warn" title="Move failed files back to the queue to try again." onclick="jobAct(' + j.id + ',\'retry\')">Retry ' + c.failed + ' failed</button>' : "") +
+        '<button class="info" title="Restrict which agents may claim files from this job." onclick="editJobAgents(' + j.id + ')">Agents…</button>' +
+        '<button class="info" title="Change this job\'s place in the shared queue relative to other jobs." onclick="openPriority(' + j.id + ')">Priority…</button>' +
+        '<button class="info" title="Create a new job pre-filled with this one\'s settings." onclick="cloneJob(' + j.id + ')">Clone</button>' +
+        '<button class="danger" title="Clear all results for this job and start completely over." onclick="jobAct(' + j.id + ',\'reset\')">Reset</button>' +
+        '<button class="danger" title="Delete this job and its queue permanently." onclick="delJob(' + j.id + ')">Delete</button>' +
       '</div></div>';
   }).join("");
 }
@@ -455,8 +463,8 @@ function renderProfiles() {
       '<td class="mono">.' + esc(p.lang_code) + '.srt</td>' +
       '<td style="color:var(--dim)">' + esc(p.notes) + '</td>' +
       '<td style="text-align:right;white-space:nowrap">' +
-        '<button onclick="openProfile(' + p.id + ')">Edit</button> ' +
-        '<button class="danger" onclick="delProfile(' + p.id + ')">Delete</button>' +
+        '<button title="Edit this profile\'s saved arguments." onclick="openProfile(' + p.id + ')">Edit</button> ' +
+        '<button class="danger" title="Delete this profile; jobs already created from it keep their own copy of the arguments." onclick="delProfile(' + p.id + ')">Delete</button>' +
       '</td></tr>').join("") + '</tbody></table>';
 }
 
