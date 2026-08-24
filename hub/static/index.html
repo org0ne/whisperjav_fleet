@@ -62,14 +62,18 @@
   button:hover { border-color:var(--accent); color:var(--accent); }
   button.primary { background:var(--accent); color:#0b1220; border-color:var(--accent); font-weight:600; }
   button.primary:hover { filter:brightness(1.1); color:#0b1220; }
-  /* A hint of intent at rest (caution, destructive, affirmative,
-     informational) via outline + text only -- background stays neutral,
-     unlike the solid fill of .primary. */
-  button.warn   { color:var(--warn); border-color:var(--warn); }
-  button.danger { color:var(--err);  border-color:var(--err); }
-  button.ok     { color:var(--ok);   border-color:var(--ok); }
-  button.info   { color:var(--run);  border-color:var(--run); }
-  button.warn:hover, button.danger:hover, button.ok:hover, button.info:hover { filter:brightness(1.25); }
+  /* A faint hint of intent at rest (caution, destructive, affirmative,
+     informational) -- background stays neutral, and both text and border
+     are muted toward --dim/--line rather than full strength. Hovering
+     reveals the real color, so the signal is still there when it matters. */
+  button.warn   { color:color-mix(in srgb, var(--warn) 55%, var(--dim)); border-color:color-mix(in srgb, var(--warn) 35%, var(--line)); }
+  button.danger { color:color-mix(in srgb, var(--err)  55%, var(--dim)); border-color:color-mix(in srgb, var(--err)  35%, var(--line)); }
+  button.ok     { color:color-mix(in srgb, var(--ok)   55%, var(--dim)); border-color:color-mix(in srgb, var(--ok)   35%, var(--line)); }
+  button.info   { color:color-mix(in srgb, var(--run)  55%, var(--dim)); border-color:color-mix(in srgb, var(--run)  35%, var(--line)); }
+  button.warn:hover   { color:var(--warn); border-color:var(--warn); }
+  button.danger:hover { color:var(--err);  border-color:var(--err); }
+  button.ok:hover     { color:var(--ok);   border-color:var(--ok); }
+  button.info:hover   { color:var(--run);  border-color:var(--run); }
   button:disabled { opacity:.4; cursor:not-allowed; }
   .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
 
