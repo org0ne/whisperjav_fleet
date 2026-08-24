@@ -111,6 +111,11 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             priority         INTEGER NOT NULL DEFAULT 100,
             dry_run          INTEGER NOT NULL DEFAULT 0,
             agent_allowlist  TEXT NOT NULL DEFAULT '[]',
+            webhook_url      TEXT NOT NULL DEFAULT '',
+            webhook_headers  TEXT NOT NULL DEFAULT '{}',
+            webhook_body     TEXT NOT NULL DEFAULT '{}',
+            webhook_rel_path TEXT NOT NULL DEFAULT '',
+            webhook_states   TEXT NOT NULL DEFAULT '["done", "skipped"]',
             scan_agent       TEXT,
             scan_started_at  REAL,
             error            TEXT NOT NULL DEFAULT '',
@@ -171,6 +176,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     job_cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
     if "agent_allowlist" not in job_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN agent_allowlist TEXT NOT NULL DEFAULT '[]'")
+    if "webhook_url" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN webhook_url TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE jobs ADD COLUMN webhook_headers TEXT NOT NULL DEFAULT '{}'")
+        conn.execute("ALTER TABLE jobs ADD COLUMN webhook_body TEXT NOT NULL DEFAULT '{}'")
+        conn.execute("ALTER TABLE jobs ADD COLUMN webhook_rel_path TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE jobs ADD COLUMN webhook_states TEXT NOT NULL DEFAULT '[\"done\", \"skipped\"]'")
 
     agent_cols = {row["name"] for row in conn.execute("PRAGMA table_info(agents)")}
     if "abort_requested" not in agent_cols:

@@ -62,6 +62,12 @@ poll, rather than a plain `os.listdir` on the server. Preserve this constraint.
 
 Agents only make outbound requests, so workers need no inbound ports.
 
+The hub itself is otherwise receive-only, with one narrow exception: an
+optional per-job webhook (`jobs.webhook_*`, see "Job and item semantics")
+lets it fire a single opaque, best-effort outbound POST on item completion,
+for external integrations. It carries no other knowledge of what's on the
+other end.
+
 ### Preventing double-processing
 
 Four independent layers. Understand all four before touching any of them:
@@ -172,6 +178,17 @@ sweep would silently no-op.
   safety net for the case where Stop was clicked on an idle agent: with no
   in-flight heartbeat to consume it there, a stale flag would otherwise
   detonate against whatever that agent claims next.
+- **`jobs.webhook_*`** is a generic, opaque completion notifier for external
+  integrations (e.g. a Stash plugin that submitted the job wanting to know
+  when to rescan). `agent_complete` fires `webhook_url` with exactly
+  `webhook_headers`/`webhook_body` as given at job creation — the hub never
+  interprets them, which is what lets one mechanism serve any caller without
+  the hub knowing anything about what's on the other end. `webhook_rel_path`
+  optionally scopes it to one file in the job (blank = every item);
+  `webhook_states` (default `["done", "skipped"]`) picks which outcomes
+  trigger it. Fired from a detached thread in `_fire_webhook` — the request
+  and all its failure modes are swallowed, so a slow or dead target can never
+  delay or fail the agent's `/complete` call.
 
 ### Constraints to preserve
 

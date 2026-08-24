@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import threading
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -152,6 +154,17 @@ class JobIn(BaseModel):
     dry_run: bool = False
     start: bool = True
     agent_allowlist: list[str] = Field(default_factory=list)   # empty = any agent
+
+    # Fired (best-effort, fire-and-forget) when a work item finishes. The hub
+    # sends exactly webhook_headers/webhook_body to webhook_url as-is -- it
+    # has no idea what's on the other end, which is what lets one generic
+    # mechanism serve any caller (e.g. a Stash plugin's own metadataScan
+    # request) without the hub knowing anything about it.
+    webhook_url: str = ""
+    webhook_headers: dict = Field(default_factory=dict)
+    webhook_body: dict = Field(default_factory=dict)
+    webhook_rel_path: str = ""                    # blank = every item in this job
+    webhook_states: list[str] = Field(default_factory=lambda: ["done", "skipped"])
 
 
 class JobAgents(BaseModel):
@@ -340,10 +353,56 @@ def agent_heartbeat(agent_id: str, beat: ItemBeat, _a=Auth):
     return {"ok": True, "abort": False, "reason": ""}
 
 
+def _fire_webhook(url: str, headers: dict, body: dict) -> None:
+    """
+    Best-effort, fire-and-forget. The hub has no idea what this request does
+    or whether it succeeds -- that's the point, it's a generic notification
+    mechanism, not a Stash (or anything-else) integration. A slow or dead
+    target must never delay or fail the agent's /complete call, which is why
+    this always runs off-thread and swallows every exception.
+    """
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", **headers},
+        )
+        with urllib.request.urlopen(req, timeout=15):
+            pass
+    except Exception:
+        pass
+
+
+def _maybe_fire_webhook(row: Any, state: str) -> None:
+    url = row["webhook_url"]
+    if not url:
+        return
+    filter_path = row["webhook_rel_path"]
+    if filter_path and filter_path != row["rel_path"]:
+        return
+    states = json.loads(row["webhook_states"] or '["done", "skipped"]')
+    if state not in states:
+        return
+    headers = json.loads(row["webhook_headers"] or "{}")
+    body = json.loads(row["webhook_body"] or "{}")
+    threading.Thread(target=_fire_webhook, args=(url, headers, body), daemon=True).start()
+
+
 @app.post("/api/agent/{agent_id}/complete")
 def agent_complete(agent_id: str, res: ItemDone, _a=Auth):
     with db.connect() as conn:
-        row = conn.execute("SELECT job_id, rel_path FROM work_items WHERE id = ?", (res.item_id,)).fetchone()
+        row = conn.execute(
+            """
+            SELECT wi.job_id, wi.rel_path,
+                   j.webhook_url, j.webhook_headers, j.webhook_body,
+                   j.webhook_rel_path, j.webhook_states
+              FROM work_items wi
+              JOIN jobs j ON j.id = wi.job_id
+             WHERE wi.id = ?
+            """,
+            (res.item_id,),
+        ).fetchone()
         ok = db.complete_item(conn, res.item_id, agent_id, res.state, res.message, res.duration)
         if ok and row:
             level = "error" if res.state == "failed" else "info"
@@ -352,6 +411,7 @@ def agent_complete(agent_id: str, res: ItemDone, _a=Auth):
                 level=level, agent_id=agent_id, job_id=row["job_id"],
             )
             db.maybe_finish_job(conn, row["job_id"])
+            _maybe_fire_webhook(row, res.state)
     return {"ok": ok}
 
 
@@ -448,6 +508,9 @@ def get_state(_a=Auth):
             job["dry_run"] = bool(job["dry_run"])
             job["video_extensions"] = json.loads(job["video_extensions"] or "[]")
             job["agent_allowlist"] = json.loads(job["agent_allowlist"] or "[]")
+            job["webhook_headers"] = json.loads(job["webhook_headers"] or "{}")
+            job["webhook_body"] = json.loads(job["webhook_body"] or "{}")
+            job["webhook_states"] = json.loads(job["webhook_states"] or "[]")
             job["counts"] = db.job_counts(conn, row["id"])
             job["active"] = [
                 {
@@ -539,14 +602,17 @@ def create_job(job: JobIn, _a=Auth):
             INSERT INTO jobs
                 (name, target_dir, profile_id, profile_name, args_template, lang_code,
                  force, video_extensions, state, priority, dry_run, agent_allowlist,
+                 webhook_url, webhook_headers, webhook_body, webhook_rel_path, webhook_states,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name, target, job.profile_id, prof["name"] if prof else "",
                 args_template, lang_code, int(force), json.dumps(exts),
                 "scanning" if job.start else "draft",
                 job.priority, int(job.dry_run), json.dumps(job.agent_allowlist),
+                job.webhook_url, json.dumps(job.webhook_headers), json.dumps(job.webhook_body),
+                job.webhook_rel_path, json.dumps(job.webhook_states),
                 now, now,
             ),
         )

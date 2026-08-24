@@ -178,6 +178,18 @@ to agents" when creating it (or click **Agents…** on an existing job) to a
 comma-separated list of agent IDs — every other agent then skips that job's
 queue entirely. Leave it blank for the default shared-queue behaviour.
 
+**Completion webhooks (API only, no dashboard UI).** `POST /api/jobs` accepts
+`webhook_url`, `webhook_headers`, and `webhook_body` — when a work item
+finishes, the hub fires exactly that request, as-is, off-thread and
+best-effort. It never inspects or interprets the payload, so it can notify
+anything: for example, a Stash plugin that submitted the job can set these to
+Stash's own GraphQL endpoint and a `metadataScan` mutation, so a completed
+subtitle gets picked up automatically. Two optional filters narrow when it
+fires: `webhook_rel_path` (a specific file in the job; blank fires for every
+item) and `webhook_states` (which outcomes trigger it; default
+`["done", "skipped"]`). A slow or unreachable target never delays or fails
+the agent's completion report.
+
 ---
 
 ## Output, per video
