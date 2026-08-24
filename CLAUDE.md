@@ -110,6 +110,14 @@ sweep would silently no-op.
 - Job states: `draft → scanning → running → paused|stopped|done|failed`. Only
   `running` jobs yield claims. Items: `pending → claimed → running →
   done|failed|skipped`.
+- **Priority is strict, not weighted.** Claims are ordered
+  `priority ASC, job id ASC, item id ASC`, so every pending item of a
+  lower-numbered job is handed out before any of a higher-numbered one —
+  a high-priority job starves the rest until its queue drains, rather than
+  sharing agents proportionally. Equal numbers interleave by job id. Set at
+  creation and changed later via `POST /api/jobs/{id}/priority`; it takes
+  effect on the next claim, with no preemption of the file already running.
+  The dashboard's `Priority…` dialog previews the resulting queue order.
 - **Args are snapshotted onto the job at creation.** Profiles are only starting
   points; editing a profile must never change a queued job.
 - `work_items.rel_path` is POSIX-style and relative to the job's `target_dir`, so
@@ -127,12 +135,16 @@ sweep would silently no-op.
 - **`jobs.agent_allowlist`** (JSON array of agent IDs, `[]` = unrestricted)
   gates both `db.claim_next()` and the scan handout in `agent_checkin`. Since
   SQLite's JSON1 extension isn't guaranteed present, matching happens in
-  Python (`db.agent_allowed`) against a batch of candidate rows rather than
-  in the SQL `WHERE` — `claim_next` fetches up to 500 pending items in
-  priority/id order and picks the first one this agent is allowed to run,
-  still inside the same `BEGIN IMMEDIATE` transaction as the CAS update, so
-  the primary claim guard (layer 1 above) is unchanged. A job with an empty
-  allowlist behaves exactly as before.
+  Python (`db.agent_allowed`) rather than in the SQL `WHERE`. **Filter per job,
+  never per item:** the allowlist is a job-level property, so `claim_next`
+  walks running jobs in `priority, id` order, skips those this agent may not
+  run, and takes the first pending item of the first eligible one. An earlier
+  version filtered a `LIMIT 500` batch of *items* and could hand an agent
+  nothing at all when enough work routed elsewhere sat ahead of its next
+  eligible item. Jobs number in the tens, so this needs no limit — which is
+  what makes starvation structurally impossible rather than merely unlikely.
+  All of it stays inside the same `BEGIN IMMEDIATE` transaction as the CAS
+  update, so the primary claim guard (layer 1 above) is unchanged.
 
 ### Constraints to preserve
 

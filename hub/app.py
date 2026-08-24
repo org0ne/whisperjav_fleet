@@ -158,6 +158,10 @@ class JobAgents(BaseModel):
     agent_allowlist: list[str] = Field(default_factory=list)
 
 
+class JobPriority(BaseModel):
+    priority: int
+
+
 class ItemDone(BaseModel):
     item_id: int
     state: str
@@ -557,6 +561,32 @@ def set_job_agents(job_id: int, body: JobAgents, _a=Auth):
             job_id=job_id,
         )
     return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/priority")
+def set_job_priority(job_id: int, body: JobPriority, _a=Auth):
+    """
+    Re-prioritise a job that is already queued or running.
+
+    Takes effect on the next claim, not the current one: an agent keeps the
+    file it is working on and picks up the new ordering when it next asks for
+    work.  Lower sorts first; see db.claim_next.
+    """
+    now = db.now()
+    with db.connect() as conn:
+        row = conn.execute("SELECT priority FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "no such job")
+        if row["priority"] == body.priority:
+            return {"ok": True, "priority": body.priority}
+        conn.execute(
+            "UPDATE jobs SET priority = ?, updated_at = ? WHERE id = ?",
+            (body.priority, now, job_id),
+        )
+        db.log_event(
+            conn, f"Priority changed: {row['priority']} -> {body.priority}", job_id=job_id
+        )
+    return {"ok": True, "priority": body.priority}
 
 
 @app.post("/api/jobs/{job_id}/action")

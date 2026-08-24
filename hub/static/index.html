@@ -254,6 +254,41 @@
   </div>
 </dialog>
 
+<dialog id="prioDlg">
+  <h2>Job priority</h2>
+  <div class="body">
+    <input type="hidden" id="prioJobId">
+    <div class="field">
+      <label>Job</label>
+      <div id="prioJobName" class="trunc" style="font-weight:600"></div>
+    </div>
+
+    <div class="field">
+      <label>Priority — lower runs first</label>
+      <input type="number" id="prioValue" oninput="renderPrioPreview()">
+      <div class="btns" style="margin-top:8px">
+        <button onclick="setBand(10)">Urgent 10</button>
+        <button onclick="setBand(50)">High 50</button>
+        <button onclick="setBand(100)">Normal 100</button>
+        <button onclick="setBand(200)">Low 200</button>
+        <button onclick="setBand(500)">Background 500</button>
+      </div>
+      <div class="hint">Applies to the next file each agent claims; whatever is
+        already in flight finishes first.</div>
+    </div>
+
+    <div class="field">
+      <label>Resulting queue order</label>
+      <div id="prioPreview" class="picker" style="max-height:34vh"></div>
+    </div>
+
+    <div class="btns" style="justify-content:flex-end">
+      <button onclick="prioDlg.close()">Cancel</button>
+      <button class="primary" onclick="savePriority()">Save</button>
+    </div>
+  </div>
+</dialog>
+
 <script>
 // ---------------------------------------------------------------------------
 // State + helpers
@@ -369,6 +404,8 @@ function renderJobs() {
         '<span>Settings</span><b>.' + esc(j.lang_code) + '.srt' +
           (j.force ? " · force" : "") + (j.dry_run ? " · dry-run" : "") + '</b>' +
         '<span>Agents</span><b>' + (j.agent_allowlist.length ? esc(j.agent_allowlist.join(", ")) : "any") + '</b>' +
+        '<span>Priority</span><b>' + j.priority + ' <span style="color:var(--dim)">' +
+          esc(bandName(j.priority)) + '</span></b>' +
       '</div>' +
       (j.active.length
         ? '<table style="margin-top:10px"><tbody>' + j.active.map(a =>
@@ -387,6 +424,7 @@ function renderJobs() {
               (j.state === "paused" ? "Resume" : (c.total ? "Rescan &amp; run" : "Start")) + '</button>') +
         (c.failed ? '<button onclick="jobAct(' + j.id + ',\'retry\')">Retry ' + c.failed + ' failed</button>' : "") +
         '<button onclick="editJobAgents(' + j.id + ')">Agents…</button>' +
+        '<button onclick="openPriority(' + j.id + ')">Priority…</button>' +
         '<button onclick="cloneJob(' + j.id + ')">Clone</button>' +
         '<button class="danger" onclick="jobAct(' + j.id + ',\'reset\')">Reset</button>' +
         '<button class="danger" onclick="delJob(' + j.id + ')">Delete</button>' +
@@ -527,6 +565,66 @@ const saveProfile = wrap(async () => {
   const id = $("pId").value;
   await (id ? api("/api/profiles/" + id, "PUT", body) : api("/api/profiles", "POST", body));
   $("profDlg").close();
+});
+
+// -- Priority ----------------------------------------------------------------
+// Claims are ordered by (priority, job id), so a lower number is served first
+// and every pending item of a higher-priority job goes out before any of a
+// lower one. States below are the ones that can still yield work.
+const QUEUEABLE = ["running", "scanning", "paused", "draft"];
+
+function bandName(p) {
+  if (p <= 10)  return "urgent";
+  if (p <= 50)  return "high";
+  if (p <= 100) return "normal";
+  if (p <= 200) return "low";
+  return "background";
+}
+
+function openPriority(id) {
+  const j = STATE.jobs.find(x => x.id === id);
+  if (!j) return;
+  $("prioJobId").value   = j.id;
+  $("prioJobName").textContent = j.name;
+  $("prioValue").value   = j.priority;
+  renderPrioPreview();
+  $("prioDlg").showModal();
+}
+
+function setBand(v) {
+  $("prioValue").value = v;
+  renderPrioPreview();
+}
+
+function renderPrioPreview() {
+  const id  = Number($("prioJobId").value);
+  const val = Number($("prioValue").value);
+  const rows = STATE.jobs
+    .filter(j => QUEUEABLE.includes(j.state))
+    .map(j => ({
+      id: j.id, name: j.name, state: j.state,
+      priority: j.id === id ? val : j.priority,
+      pending: j.counts.pending + j.counts.claimed + j.counts.running,
+      me: j.id === id
+    }))
+    .sort((a, b) => a.priority - b.priority || a.id - b.id);
+
+  $("prioPreview").innerHTML = rows.map(r =>
+    '<div style="cursor:default;display:flex;gap:10px' +
+      (r.me ? ';color:var(--accent)' : "") + '">' +
+      '<span style="width:44px;flex:none;text-align:right">' + r.priority + '</span>' +
+      '<span class="trunc" style="flex:1">' + esc(r.name) + (r.me ? " ←" : "") + '</span>' +
+      '<span style="flex:none;color:var(--dim)">' + r.pending + ' left</span>' +
+    '</div>').join("") ||
+    '<div class="empty" style="padding:12px">No jobs are queued.</div>';
+}
+
+const savePriority = wrap(async () => {
+  const id = Number($("prioJobId").value);
+  const priority = Number($("prioValue").value);
+  if (!Number.isFinite(priority)) throw new Error("Priority must be a number.");
+  await api("/api/jobs/" + id + "/priority", "POST", { priority });
+  $("prioDlg").close();
 });
 
 // -- Folder picker -----------------------------------------------------------

@@ -246,30 +246,44 @@ def claim_next(agent_id: str, *, lease_seconds: int = CLAIM_LEASE_SECONDS) -> Op
             try:
                 release_expired_claims(conn)
 
-                # Fetch a batch rather than the single front-of-queue item so
-                # an `agent_allowlist` restriction can be applied in Python:
-                # SQLite's JSON1 extension isn't guaranteed present, and the
-                # rest of this codebase already treats these list columns as
-                # opaque JSON blobs handled at the application layer. The
-                # batch size just needs to comfortably exceed the number of
-                # routed-elsewhere items that could be queued ahead of this
-                # agent's next eligible one.
-                candidates = conn.execute(
+                # `agent_allowlist` is a property of the *job*, not of the
+                # item, so eligibility is decided per job.  That matters:
+                # filtering a batch of candidate items in Python instead meant
+                # an agent could be handed nothing at all when enough items
+                # routed to other machines sat ahead of its next eligible one.
+                # Jobs number in the tens, so walking them is cheap and needs
+                # no LIMIT -- which is what makes starvation impossible rather
+                # than merely unlikely.  (The filtering stays in Python because
+                # SQLite's JSON1 extension is not guaranteed to be present.)
+                #
+                # Ordering is unchanged: priority, then job id, then item id
+                # within the chosen job.
+                eligible_jobs = conn.execute(
                     """
-                    SELECT wi.id, wi.job_id, wi.rel_path, wi.attempts, j.agent_allowlist
-                      FROM work_items wi
-                      JOIN jobs j ON j.id = wi.job_id
-                     WHERE wi.state = 'pending'
-                       AND j.state = 'running'
-                     ORDER BY j.priority ASC, j.id ASC, wi.id ASC
-                     LIMIT 500
+                    SELECT id, agent_allowlist
+                      FROM jobs
+                     WHERE state = 'running'
+                     ORDER BY priority ASC, id ASC
                     """
                 ).fetchall()
 
-                row = next(
-                    (r for r in candidates if agent_allowed(r["agent_allowlist"], agent_id)),
-                    None,
-                )
+                row = None
+                for job_row in eligible_jobs:
+                    if not agent_allowed(job_row["agent_allowlist"], agent_id):
+                        continue
+                    # Indexed by idx_items_claimable (job_id, state, id).
+                    row = conn.execute(
+                        """
+                        SELECT id, job_id, rel_path, attempts
+                          FROM work_items
+                         WHERE job_id = ? AND state = 'pending'
+                         ORDER BY id ASC
+                         LIMIT 1
+                        """,
+                        (job_row["id"],),
+                    ).fetchone()
+                    if row is not None:
+                        break
 
                 if row is None:
                     conn.execute("COMMIT")
