@@ -128,6 +128,8 @@ sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-agent
 | `allow_browse` | Whether this agent answers the dashboard's folder picker. |
 | `path_map` | Prefix rewrites for a machine that mounts the share elsewhere. Empty when every machine uses the same path. |
 | `log_output_lines` | Echo WhisperJAV's output into the agent log. |
+| `ollama_unload_on_abort` | On any abort, ask Ollama to drop the job's translate model from VRAM (`false` by default). See "Notes and limits" below. |
+| `ollama_url` | Where that request goes. Default `http://127.0.0.1:11434`. |
 
 Every field can also come from the environment: `FLEET_HUB_URL`,
 `FLEET_AGENT_ID`, `FLEET_HUB_USER`, `FLEET_HUB_PASS`, `WHISPERJAV_BIN`.
@@ -210,7 +212,12 @@ Unchanged from the batch script, plus two provenance lines:
 - **A detached helper can outlive a Pause.** Killing the process group reaches
   everything WhisperJAV spawns normally. A process that deliberately escapes
   into its own session (or a pre-existing daemon such as an `ollama serve` you
-  started yourself) is by definition out of reach.
+  started yourself) is by definition out of reach — an aborted run frees
+  whisperjav's own GPU memory immediately, but not a model Ollama is still
+  holding. Set `ollama_unload_on_abort: true` in that agent's config and it
+  will ask Ollama to drop the job's `--translate-model` (`keep_alive: 0`) the
+  moment an abort happens, best-effort. `ollama_url` defaults to
+  `http://127.0.0.1:11434`.
 
 - **Command delivery is at-most-once.** A command issued exactly as the hub or
   agent restarts can be lost — click the button again. Fine for a manual

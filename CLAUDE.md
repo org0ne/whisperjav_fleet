@@ -103,6 +103,19 @@ Three concerns, deliberately separated in `agent/agent.py`:
   it up and kills the process group; `_run_one` treats an aborted run as a
   clean requeue, not a failure.
 
+  This reaches everything whisperjav actually spawned, but a translate
+  backend it talks to over HTTP (`--translate-provider ollama`) is a
+  pre-existing daemon, not a child of that process group — killing the group
+  never touches it, and Ollama keeps the model resident in VRAM regardless.
+  `Agent._maybe_unload_ollama` is the opt-in mitigation: gated on
+  `ollama_unload_on_abort`, it scans the already-built `wj_args` for
+  `--translate-provider ollama` and its paired `--translate-model`, then
+  POSTs `{"model": ..., "keep_alive": 0}` to `{ollama_url}/api/generate` —
+  Ollama's documented way to unload a model without running inference. Pure
+  best-effort: any failure is logged and swallowed, never allowed to affect
+  the (already-aborted) transcription's outcome. Lives in `agent.py`, not
+  `runner.py`, which is deliberately HTTP-free.
+
 `runner._terminate_tree` kills the child's whole **process group** (children are
 spawned with `start_new_session=True`), because WhisperJAV spawns helpers that
 would otherwise be orphaned holding GPU memory. It captures the pgid *before*

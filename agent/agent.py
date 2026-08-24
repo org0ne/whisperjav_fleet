@@ -48,7 +48,17 @@ DEFAULT_CONFIG = {
     "allow_browse": True,             # answer dashboard folder-picker requests
     "path_map": [],                   # [{"from": "/storage/pool", "to": "P:\\"}]
     "log_output_lines": False,        # echo whisperjav output to the agent log
+    "ollama_unload_on_abort": False,  # best-effort: drop the translate model from VRAM on abort
+    "ollama_url": "http://127.0.0.1:11434",
 }
+
+
+def _flag_value(args: list[str], flag: str) -> Optional[str]:
+    """The token immediately following `flag` in an argv-style list, if any."""
+    try:
+        return args[args.index(flag) + 1]
+    except (ValueError, IndexError):
+        return None
 
 
 def log(message: str, level: str = "INFO") -> None:
@@ -170,6 +180,40 @@ class Agent:
                 result = dst + result[len(src):]
                 break
         return Path(result)
+
+    # -- Ollama -------------------------------------------------------------
+
+    def _maybe_unload_ollama(self, wj_args: list[str]) -> None:
+        """
+        Killing whisperjav's process group frees everything *it* spawned, but
+        `--translate-provider ollama` talks to a pre-existing `ollama serve`
+        daemon over HTTP -- that process is never a child of whisperjav's, so
+        no signal sent to its process group can reach it, and it holds the
+        translate model in VRAM regardless of what happens to whisperjav.
+        This is opt-in and best-effort: any failure here must not affect the
+        outcome of the (already aborted) transcription.
+        """
+        if not self.cfg.get("ollama_unload_on_abort"):
+            return
+        if _flag_value(wj_args, "--translate-provider") != "ollama":
+            return
+        model = _flag_value(wj_args, "--translate-model")
+        if not model:
+            return
+
+        url = self.cfg.get("ollama_url", "http://127.0.0.1:11434").rstrip("/") + "/api/generate"
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps({"model": model, "keep_alive": 0}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10):
+                pass
+            log(f"asked Ollama to unload {model}")
+        except Exception as exc:
+            log(f"could not unload Ollama model {model}: {exc}", "WARN")
 
     # -- main loop ----------------------------------------------------------
 
@@ -417,6 +461,7 @@ class Agent:
             # No SRT was produced, so nothing is half-done on disk: put the
             # file back and let whoever picks it up next start it cleanly.
             log(f"aborted after {runner.format_duration(elapsed)}: {item['rel_path']}", "WARN")
+            self._maybe_unload_ollama(wj_args)
             try:
                 self.hub.requeue(item_id, "aborted by pause/stop")
             except Exception:
