@@ -166,6 +166,12 @@ class JobIn(BaseModel):
     webhook_rel_path: str = ""                    # blank = every item in this job
     webhook_states: list[str] = Field(default_factory=lambda: ["done", "skipped"])
 
+    # If true, a job that finishes with zero failed items is deleted rather
+    # than left in the 'done' list -- for callers (e.g. a Stash plugin) that
+    # submit many small one-off jobs and have no use for keeping them around.
+    # A job with any failures is kept regardless, so the error is not lost.
+    auto_delete_on_finish: bool = False
+
 
 class JobAgents(BaseModel):
     agent_allowlist: list[str] = Field(default_factory=list)
@@ -511,6 +517,7 @@ def get_state(_a=Auth):
             job["webhook_headers"] = json.loads(job["webhook_headers"] or "{}")
             job["webhook_body"] = json.loads(job["webhook_body"] or "{}")
             job["webhook_states"] = json.loads(job["webhook_states"] or "[]")
+            job["auto_delete_on_finish"] = bool(job["auto_delete_on_finish"])
             job["counts"] = db.job_counts(conn, row["id"])
             job["active"] = [
                 {
@@ -603,8 +610,8 @@ def create_job(job: JobIn, _a=Auth):
                 (name, target_dir, profile_id, profile_name, args_template, lang_code,
                  force, video_extensions, state, priority, dry_run, agent_allowlist,
                  webhook_url, webhook_headers, webhook_body, webhook_rel_path, webhook_states,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 auto_delete_on_finish, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name, target, job.profile_id, prof["name"] if prof else "",
@@ -613,6 +620,7 @@ def create_job(job: JobIn, _a=Auth):
                 job.priority, int(job.dry_run), json.dumps(job.agent_allowlist),
                 job.webhook_url, json.dumps(job.webhook_headers), json.dumps(job.webhook_body),
                 job.webhook_rel_path, json.dumps(job.webhook_states),
+                int(job.auto_delete_on_finish),
                 now, now,
             ),
         )

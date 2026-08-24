@@ -116,6 +116,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             webhook_body     TEXT NOT NULL DEFAULT '{}',
             webhook_rel_path TEXT NOT NULL DEFAULT '',
             webhook_states   TEXT NOT NULL DEFAULT '["done", "skipped"]',
+            auto_delete_on_finish INTEGER NOT NULL DEFAULT 0,
             scan_agent       TEXT,
             scan_started_at  REAL,
             error            TEXT NOT NULL DEFAULT '',
@@ -182,6 +183,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN webhook_body TEXT NOT NULL DEFAULT '{}'")
         conn.execute("ALTER TABLE jobs ADD COLUMN webhook_rel_path TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE jobs ADD COLUMN webhook_states TEXT NOT NULL DEFAULT '[\"done\", \"skipped\"]'")
+    if "auto_delete_on_finish" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN auto_delete_on_finish INTEGER NOT NULL DEFAULT 0")
 
     agent_cols = {row["name"] for row in conn.execute("PRAGMA table_info(agents)")}
     if "abort_requested" not in agent_cols:
@@ -454,12 +457,20 @@ def job_counts(conn: sqlite3.Connection, job_id: int) -> dict:
 
 def maybe_finish_job(conn: sqlite3.Connection, job_id: int) -> None:
     """Flip a running job to 'done' once no item can still be worked on."""
-    row = conn.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    row = conn.execute("SELECT name, state, auto_delete_on_finish FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if row is None or row["state"] != "running":
         return
     counts = job_counts(conn, job_id)
     outstanding = counts["pending"] + counts["claimed"] + counts["running"]
     if counts["total"] > 0 and outstanding == 0:
+        # auto_delete only fires on a clean finish -- a job with failures is
+        # left in place (with its items' error text) for manual review, even
+        # if the caller asked for cleanup. It can still be deleted by hand.
+        if row["auto_delete_on_finish"] and counts["failed"] == 0:
+            log_event(conn, f"Job '{row['name']}' finished cleanly "
+                            f"({counts['done']} done, {counts['skipped']} skipped) and was auto-deleted")
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            return
         conn.execute(
             "UPDATE jobs SET state = 'done', updated_at = ? WHERE id = ?",
             (now(), job_id),

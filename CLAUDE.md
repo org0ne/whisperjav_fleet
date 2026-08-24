@@ -189,6 +189,13 @@ sweep would silently no-op.
   trigger it. Fired from a detached thread in `_fire_webhook` — the request
   and all its failure modes are swallowed, so a slow or dead target can never
   delay or fail the agent's `/complete` call.
+- **`jobs.auto_delete_on_finish`** lets a caller (e.g. that same external
+  integration) opt a job out of the default persistent history. Checked in
+  `maybe_finish_job` at the exact moment a job would otherwise flip to
+  `done`: if the flag is set **and** `counts["failed"] == 0`, the job is
+  deleted instead. A job finishing with *any* failures is always kept
+  regardless of the flag — auto-cleanup must never delete the one thing
+  (the failing item's error text) someone would want to look at.
 
 ### Constraints to preserve
 

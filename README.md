@@ -190,6 +190,13 @@ item) and `webhook_states` (which outcomes trigger it; default
 `["done", "skipped"]`). A slow or unreachable target never delays or fails
 the agent's completion report.
 
+`auto_delete_on_finish` (also API-only) deletes a job once it finishes with
+zero failed items, instead of leaving it in the list — for callers that
+submit many small one-off jobs (again, a Stash plugin submitting one job per
+scene is the motivating case) and have no use for a persistent history. Any
+failure keeps the job around regardless, so nothing about the failure is
+ever silently lost.
+
 ---
 
 ## Output, per video
