@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import json
 import os
 import signal
@@ -50,7 +51,16 @@ DEFAULT_CONFIG = {
     "log_output_lines": False,        # echo whisperjav output to the agent log
     "ollama_unload_on_abort": False,  # best-effort: drop the translate model from VRAM on abort
     "ollama_url": "http://127.0.0.1:11434",
+    "storage_retry_seconds": 60,      # how long to stop claiming after the media mount vanishes
 }
+
+# OSError codes that mean the *share* is unreachable, as opposed to something
+# being wrong with one particular file.  A CIFS mount whose server went away
+# raises these from a bare `stat()` on the job's directory.
+_STORAGE_DOWN_ERRNOS = frozenset({
+    errno.EHOSTDOWN, errno.EHOSTUNREACH, errno.ENETDOWN, errno.ENETUNREACH,
+    errno.ENOTCONN, errno.ECONNRESET, errno.ETIMEDOUT, errno.ESTALE,
+})
 
 
 def _flag_value(args: list[str], flag: str) -> Optional[str]:
@@ -148,6 +158,8 @@ class Agent:
         self._paused = False
         self._pending_scan: Optional[dict] = None
         self._connected = threading.Event()
+        # Work loop only: no claims until this time when the mount is gone.
+        self._storage_down_until = 0.0
 
     # -- status -------------------------------------------------------------
 
@@ -298,7 +310,8 @@ class Agent:
                 self._handle_scan(task)
                 did_work = True
 
-            elif not self._paused and self._connected.is_set():
+            elif (not self._paused and self._connected.is_set()
+                  and time.time() >= self._storage_down_until):
                 try:
                     item = self.hub.claim()
                 except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as exc:
@@ -411,6 +424,20 @@ class Agent:
                 lock.release()
 
         except OSError as exc:
+            if exc.errno in _STORAGE_DOWN_ERRNOS:
+                # The mount is gone, not this file.  Marking it failed would
+                # be wrong twice over: nothing is wrong with the video, and
+                # the work loop would immediately claim the next item and
+                # fail that one within milliseconds too -- burning through
+                # the whole queue as "failed" while the share is down.  Hand
+                # the item back without prejudice and stop claiming for a
+                # while; the loop resumes on its own once the hold lapses.
+                hold = float(self.cfg.get("storage_retry_seconds", 60))
+                self._storage_down_until = time.time() + hold
+                log(f"storage unreachable ({exc}); requeued {item['rel_path']} "
+                    f"and holding off claims for {hold:.0f}s", "WARN")
+                self._requeue(item_id, f"storage unreachable on {self.agent_id}: {exc}")
+                return
             log(f"filesystem error on {item['rel_path']}: {exc}", "ERROR")
             self._finish(item_id, "failed", f"filesystem error: {exc}",
                          duration=time.time() - started)
@@ -532,6 +559,14 @@ class Agent:
 
         log(f"ok: {srt_out.name} in {runner.format_duration(elapsed)}")
         self._finish(item_id, "done", "", duration=elapsed)
+
+    def _requeue(self, item_id: int, reason: str) -> None:
+        try:
+            self.hub.requeue(item_id, reason)
+        except Exception as exc:
+            # Same safety net as a lost completion: the lease lapses and the
+            # hub returns the item to the pool by itself.
+            log(f"could not requeue ({exc}); the lease will expire instead", "WARN")
 
     def _finish(self, item_id: int, state: str, message: str = "", duration: float = 0.0) -> None:
         if state in self.counts:

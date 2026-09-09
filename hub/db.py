@@ -19,6 +19,7 @@ the media filesystem.  Agents do all filesystem work and report back.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import time
@@ -60,7 +61,7 @@ def configure(db_path: Path) -> None:
         _migrate_schema(conn)
 
 
-def connect() -> sqlite3.Connection:
+def _open() -> sqlite3.Connection:
     """
     A fresh connection per call.  `timeout` makes concurrent writers wait for
     the write lock rather than immediately raising 'database is locked'.
@@ -71,6 +72,30 @@ def connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+@contextlib.contextmanager
+def connect():
+    """
+    `with db.connect() as conn:` -- a fresh connection that is *closed* on
+    exit, whatever happens inside.
+
+    This must not be replaced by `with sqlite3.connect(...) as conn:`.  A
+    Connection's own context manager only commits or rolls back (a no-op in
+    our autocommit mode); it never closes.  And dropping the last reference
+    does not close it either: every Connection sits in a reference cycle
+    with its own statement cache (an lru_cache wrapper around the
+    connection), so it is only reclaimed when the cyclic garbage collector
+    happens to run a full pass.  Until then each abandoned connection keeps
+    its file descriptors and up to ~2 MB of page cache alive.  On a hub
+    answering a request every second that accumulated ~200 open connections
+    between GC passes and eventually OOM-killed the process in its LXC.
+    """
+    conn = _open()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _create_schema(conn: sqlite3.Connection) -> None:
@@ -258,8 +283,7 @@ def claim_next(agent_id: str, *, lease_seconds: int = CLAIM_LEASE_SECONDS) -> Op
     item.  The `AND state = 'pending'` on the UPDATE is the belt-and-braces
     check that makes the operation a genuine compare-and-swap.
     """
-    conn = connect()
-    try:
+    with connect() as conn:
         for _ in range(5):
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -365,8 +389,6 @@ def claim_next(agent_id: str, *, lease_seconds: int = CLAIM_LEASE_SECONDS) -> Op
                     pass
                 raise
         return None
-    finally:
-        conn.close()
 
 
 def heartbeat_item(conn: sqlite3.Connection, item_id: int, agent_id: str,

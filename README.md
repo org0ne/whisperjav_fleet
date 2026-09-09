@@ -130,6 +130,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-agent
 | `log_output_lines` | Echo WhisperJAV's output into the agent log. |
 | `ollama_unload_on_abort` | On any abort, ask Ollama to drop the job's translate model from VRAM (`false` by default). See "Notes and limits" below. |
 | `ollama_url` | Where that request goes. Default `http://127.0.0.1:11434`. |
+| `storage_retry_seconds` | When the media share itself becomes unreachable (host down, stale mount), the item in hand is requeued rather than failed and the agent stops claiming for this long before trying again. Default `60`. |
 
 Every field can also come from the environment: `FLEET_HUB_URL`,
 `FLEET_AGENT_ID`, `FLEET_HUB_USER`, `FLEET_HUB_PASS`, `WHISPERJAV_BIN`.

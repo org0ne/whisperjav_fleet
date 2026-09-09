@@ -155,6 +155,20 @@ sweep would silently no-op.
   prejudice (pause/stop), leaving the item `pending` and no marker.
 - A lost completion report is safe by design: the lease expires and the item
   returns to the pool, costing a re-run at worst.
+- **An unreachable share is not a failed file.** `agent._process` checks the
+  errno of any `OSError` against `_STORAGE_DOWN_ERRNOS` (host down, network
+  unreachable, stale handle, ...): those requeue the item and set
+  `_storage_down_until`, which the work loop honours by not claiming until it
+  lapses (`storage_retry_seconds`). Without this a dead CIFS mount made the
+  agent fail every item in the queue at one per claim round-trip, since
+  the pre-flight `stat()` raises instantly. Any other `OSError` is still a
+  genuine `failed`.
+- **`db.connect()` closes.** It is a context manager that closes the
+  connection on exit -- not `sqlite3.Connection`'s own `with`, which only
+  commits. A Connection is in a reference cycle with its statement cache, so
+  an unclosed one lingers with its fds and page cache until a full GC pass;
+  on the always-on hub that grew to ~200 open connections and an OOM kill
+  in its 256 MB LXC. Never open a connection outside `with db.connect()`.
 - **`jobs.agent_allowlist`** (JSON array of agent IDs, `[]` = unrestricted)
   gates both `db.claim_next()` and the scan handout in `agent_checkin`. Since
   SQLite's JSON1 extension isn't guaranteed present, matching happens in
