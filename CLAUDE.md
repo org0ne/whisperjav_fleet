@@ -107,7 +107,10 @@ Three concerns, deliberately separated in `agent/agent.py`:
   the *job* was paused/stopped, or because this specific *agent* was Stopped
   (see below). Either way `runner.run_whisperjav`'s `should_abort` check picks
   it up and kills the process group; `_run_one` treats an aborted run as a
-  clean requeue, not a failure.
+  clean requeue, not a failure. `run_whisperjav` also reports *aborted* when
+  the child exits non-zero on its own while `should_abort` is already true:
+  on a service stop, systemd's SIGTERM can reach whisperjav before the
+  agent's poll does. The unit sets `KillMode=mixed` for the same reason.
 
   This reaches everything whisperjav actually spawned, but a translate
   backend it talks to over HTTP (`--translate-provider ollama`) is a

@@ -17,7 +17,11 @@ ExecStart=/usr/bin/python3 /opt/whisperjav-fleet/agent/agent.py
 Restart=always
 RestartSec=10
 
-# Give an in-flight transcription time to be killed and requeued cleanly.
+# Signal only the agent on stop, not the whole control group: it then kills
+# whisperjav's process group itself and requeues the file cleanly, instead of
+# systemd terminating whisperjav directly and the run being recorded as a
+# failure. Anything still alive after TimeoutStopSec is SIGKILLed.
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=90
 

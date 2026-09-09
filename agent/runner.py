@@ -587,6 +587,16 @@ def run_whisperjav(binary: str, args: list[str],
     for t in threads:
         t.join(timeout=5)
 
+    # The child may also die *because* an abort is under way without us being
+    # the ones to kill it: a service stop delivers SIGTERM to whisperjav at the
+    # same instant as to the agent, so it is often gone before the next poll
+    # above can notice `should_abort`.  A non-zero exit while an abort was
+    # requested says nothing about the file, so report it as the abort it is
+    # rather than a failure (which would also plant a .whisper-failed marker).
+    # A clean exit 0 in the same window is still a genuine result.
+    if not aborted and proc.returncode != 0 and should_abort and should_abort():
+        aborted = True
+
     with lock:
         output = "\n".join(captured)
     return proc.returncode if proc.returncode is not None else 1, output, aborted
