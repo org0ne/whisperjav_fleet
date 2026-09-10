@@ -17,5 +17,11 @@
 
   "storage_retry_seconds": 60,
 
+  "gpu_hold_url": "",
+  "gpu_hold_mode": "yield",
+  "gpu_hold_poll_seconds": 3,
+  "gpu_hold_while_resident": true,
+  "gpu_hold_release_seconds": 30,
+
   "path_map": []
 }

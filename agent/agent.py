@@ -52,6 +52,19 @@ DEFAULT_CONFIG = {
     "ollama_unload_on_abort": False,  # best-effort: drop the translate model from VRAM on abort
     "ollama_url": "http://127.0.0.1:11434",
     "storage_retry_seconds": 60,      # how long to stop claiming after the media mount vanishes
+
+    # -- GPU sharing with Jasna (stash-jasna-bridge) ------------------------
+    # Jasna has priority on the GPU. The agent polls the bridge's health URL
+    # and stays off the GPU while Jasna needs it. Blank URL = feature off.
+    "gpu_hold_url": "",               # e.g. http://127.0.0.1:8770/jasna/health
+    "gpu_hold_mode": "yield",         # yield: abort+requeue the in-flight file the moment Jasna starts;
+                                      # finish: let the current file complete, only stop claiming new ones
+    "gpu_hold_poll_seconds": 3,       # how often to re-check the bridge while working or holding
+    "gpu_hold_while_resident": True,  # also hold while the Jasna PROCESS is resident (it keeps its
+                                      # models in VRAM until the bridge's process idle timeout), not
+                                      # only while a viewer session is active
+    "gpu_hold_release_seconds": 30,   # the hold must be clear this long before claiming resumes, so a
+                                      # quick OFF/ON does not restart a long file just to yield it again
 }
 
 # OSError codes that mean the *share* is unreachable, as opposed to something
@@ -138,6 +151,87 @@ class HubClient:
 # Agent
 # ---------------------------------------------------------------------------
 
+class GpuHold:
+    """
+    Yield the GPU to Jasna.
+
+    Jasna (restored playback via stash-jasna-bridge) and this agent share one
+    GPU, and their VRAM does not fit together: Jasna's hq preset is ~14 GB and
+    the Ollama translate model another ~9 GB on a 24 GB card. So Jasna wins:
+    while it needs the GPU the agent does not claim files, and in "yield" mode
+    it also aborts and requeues the file it is working on.
+
+    The signal is the bridge's public health endpoint (no auth):
+      active           a viewer session is live
+      preparing        a session is being created (models loading - yield NOW,
+                       before Jasna tries to allocate)
+      jasna.running    the Jasna process is resident, i.e. still holding VRAM
+                       even with nobody watching, until the bridge's idle stop
+    Fail-open: an unreachable bridge means no Jasna, so the agent keeps working.
+    """
+
+    def __init__(self, cfg: dict):
+        self.url = (cfg.get("gpu_hold_url") or "").strip()
+        self.mode = str(cfg.get("gpu_hold_mode", "yield")).lower()
+        self.poll = max(1.0, float(cfg.get("gpu_hold_poll_seconds", 3)))
+        self.while_resident = bool(cfg.get("gpu_hold_while_resident", True))
+        self.release = max(0.0, float(cfg.get("gpu_hold_release_seconds", 30)))
+        self.held = False
+        self.reason = ""
+        self._last_held_at = 0.0
+        self._lock = threading.Lock()
+        self._warned_unreachable = False
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.url)
+
+    def probe(self) -> tuple[bool, str]:
+        """Ask the bridge now. Returns (held, reason) and updates cached state."""
+        if not self.enabled:
+            return False, ""
+        try:
+            with urllib.request.urlopen(self.url, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if self._warned_unreachable:
+                log("gpu hold: bridge reachable again")
+                self._warned_unreachable = False
+        except Exception as exc:
+            if not self._warned_unreachable:
+                log(f"gpu hold: bridge unreachable ({exc}); assuming Jasna is not running", "WARN")
+                self._warned_unreachable = True
+            return self._set(False, "")
+        jasna = data.get("jasna") or {}
+        if data.get("active"):
+            return self._set(True, "viewer active")
+        if data.get("preparing"):
+            return self._set(True, "session starting")
+        if self.while_resident and jasna.get("running"):
+            return self._set(True, "Jasna resident, holding VRAM")
+        return self._set(False, "")
+
+    def _set(self, held: bool, reason: str) -> tuple[bool, str]:
+        with self._lock:
+            changed = held != self.held
+            self.held, self.reason = held, reason
+            if held:
+                self._last_held_at = time.time()
+        if changed:
+            log(f"gpu hold: {'HELD (' + reason + ')' if held else 'released'}")
+        return held, reason
+
+    def blocking(self) -> bool:
+        """True while new files must not be claimed: held now, or released less
+        than `release` seconds ago (hysteresis against a quick OFF/ON)."""
+        if not self.enabled:
+            return False
+        held, _ = self.probe()
+        if held:
+            return True
+        with self._lock:
+            return (time.time() - self._last_held_at) < self.release
+
+
 class Agent:
     def __init__(self, config: dict):
         self.cfg = config
@@ -150,8 +244,10 @@ class Agent:
         self.started_at = time.time()
         self.shutdown = threading.Event()
         self.current: dict = {}          # description of the in-flight item
-        self.counts = {"done": 0, "failed": 0, "skipped": 0}
+        self.counts = {"done": 0, "failed": 0, "skipped": 0, "yielded": 0}
         self._abort = threading.Event()
+        self._gpu_hold = GpuHold(config)
+        self._hold_logged = False
         self._progress = ""
 
         # Set by the presence thread, read by the work loop.
@@ -164,9 +260,11 @@ class Agent:
     # -- status -------------------------------------------------------------
 
     def status(self) -> dict:
+        held = self._gpu_hold.enabled and self._gpu_hold.held
         return {
             "host":        socket.gethostname(),
-            "state":       "working" if self.current else "idle",
+            "state":       "working" if self.current else ("holding" if held else "idle"),
+            "gpu_hold":    self._gpu_hold.reason if held else "",
             "current":     self.current,
             "progress":    self._progress[:300],
             "counts":      dict(self.counts),
@@ -293,6 +391,9 @@ class Agent:
         log(f"agent '{self.agent_id}' starting")
         log(f"hub       : {self.cfg['hub_url']}")
         log(f"whisperjav: {self.binary} ({self.version})")
+        if self._gpu_hold.enabled:
+            log(f"gpu hold  : {self._gpu_hold.url} (mode {self._gpu_hold.mode}, "
+                f"{'also while resident' if self._gpu_hold.while_resident else 'active sessions only'})")
 
         presence = threading.Thread(target=self._presence_loop, daemon=True)
         presence.start()
@@ -311,7 +412,8 @@ class Agent:
                 did_work = True
 
             elif (not self._paused and self._connected.is_set()
-                  and time.time() >= self._storage_down_until):
+                  and time.time() >= self._storage_down_until
+                  and not self._gpu_holding()):
                 try:
                     item = self.hub.claim()
                 except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as exc:
@@ -363,6 +465,18 @@ class Agent:
                 self.hub.scan_result(job_id, [], str(exc))
             except Exception:
                 pass
+
+    def _gpu_holding(self) -> bool:
+        """Claim gate: True while Jasna has the GPU (or just released it)."""
+        blocking = self._gpu_hold.blocking()
+        if blocking and not self._hold_logged:
+            why = self._gpu_hold.reason or "release window"
+            log(f"not claiming: GPU held by Jasna ({why})")
+            self._hold_logged = True
+        elif not blocking and self._hold_logged:
+            log("GPU free: claiming resumes")
+            self._hold_logged = False
+        return blocking
 
     # -- the work -----------------------------------------------------------
 
@@ -488,6 +602,22 @@ class Agent:
         beat_thread = threading.Thread(target=beat, daemon=True)
         beat_thread.start()
 
+        # -- GPU yield watchdog (mode "yield") ------------------------------
+        # Jasna has priority: the moment the bridge reports a session starting
+        # or active, abort this file so whisperjav (and, via the abort path,
+        # the Ollama model) leave VRAM before Jasna needs it.
+        yielded = threading.Event()
+        if self._gpu_hold.enabled and self._gpu_hold.mode == "yield":
+            def gpu_watch():
+                while not stop_beat.wait(self._gpu_hold.poll):
+                    held, why = self._gpu_hold.probe()
+                    if held:
+                        log(f"yielding GPU to Jasna ({why}); aborting {item['rel_path']}", "WARN")
+                        yielded.set()
+                        self._abort.set()
+                        return
+            threading.Thread(target=gpu_watch, daemon=True).start()
+
         def on_line(line: str) -> None:
             self._progress = line.strip()
             if self.cfg.get("log_output_lines"):
@@ -509,10 +639,13 @@ class Agent:
         if aborted:
             # No SRT was produced, so nothing is half-done on disk: put the
             # file back and let whoever picks it up next start it cleanly.
-            log(f"aborted after {runner.format_duration(elapsed)}: {item['rel_path']}", "WARN")
+            reason = "yielded to Jasna" if yielded.is_set() else "aborted by pause/stop"
+            if yielded.is_set():
+                self.counts["yielded"] += 1
+            log(f"aborted ({reason}) after {runner.format_duration(elapsed)}: {item['rel_path']}", "WARN")
             self._maybe_unload_ollama(wj_args)
             try:
-                self.hub.requeue(item_id, "aborted by pause/stop")
+                self.hub.requeue(item_id, reason)
             except Exception:
                 pass
             return
@@ -593,7 +726,7 @@ def load_config(path: Optional[str]) -> dict:
     # Environment overrides make container/systemd deployment easy.
     for key, env in (("hub_url", "FLEET_HUB_URL"), ("agent_id", "FLEET_AGENT_ID"),
                      ("hub_user", "FLEET_HUB_USER"), ("hub_pass", "FLEET_HUB_PASS"),
-                     ("whisperjav_bin", "WHISPERJAV_BIN")):
+                     ("whisperjav_bin", "WHISPERJAV_BIN"), ("gpu_hold_url", "FLEET_GPU_HOLD_URL")):
         if os.environ.get(env):
             cfg[key] = os.environ[env]
     return cfg

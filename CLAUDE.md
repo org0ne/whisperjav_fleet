@@ -17,7 +17,13 @@ currently one, see "NFO selection" below).
 
 ## Commands
 
-There is no build step, no linter config, and no automated test suite.
+There is no build step and no linter config. One automated suite exists, for
+the GPU-hold feature: it drives the real Agent against a fake hub, a fake
+bridge health endpoint and a fake `whisperjav`, no GPU or real hub needed.
+
+```bash
+python3 -m unittest -v tests.test_gpu_hold     # ~25s
+```
 
 ```bash
 # Hub (needs the venv; FastAPI + uvicorn)
@@ -35,7 +41,7 @@ python3 -m py_compile hub/app.py hub/db.py agent/agent.py agent/runner.py
 
 `HUB_USER` / `HUB_PASS` enable HTTP Basic on the hub (off when unset). Agent
 settings also read from `FLEET_HUB_URL`, `FLEET_AGENT_ID`, `FLEET_HUB_USER`,
-`FLEET_HUB_PASS`, `WHISPERJAV_BIN`.
+`FLEET_HUB_PASS`, `WHISPERJAV_BIN`, `FLEET_GPU_HOLD_URL`.
 
 ## Manual verification
 
@@ -124,6 +130,22 @@ Three concerns, deliberately separated in `agent/agent.py`:
   best-effort: any failure is logged and swallowed, never allowed to affect
   the (already-aborted) transcription's outcome. Lives in `agent.py`, not
   `runner.py`, which is deliberately HTTP-free.
+
+- **GPU yield watchdog** (inside `_run_one`, only when `gpu_hold_url` is set
+  and `gpu_hold_mode` is `yield`) — polls the stash-jasna-bridge health URL
+  every `gpu_hold_poll_seconds` and, the moment it reports a viewer session
+  active or `preparing` (or the Jasna process resident, with
+  `gpu_hold_while_resident`), sets the same `_abort` event the heartbeat uses.
+  So a yield rides the existing abort path end to end: process group killed,
+  Ollama unload (if enabled), clean requeue — but with reason "yielded to
+  Jasna" and `counts["yielded"]` bumped. `GpuHold` (module level) owns the
+  probe and the cached held state; the work loop's claim gate
+  (`_gpu_holding`) uses `GpuHold.blocking()`, which adds a release-window
+  hysteresis so a quick OFF/ON in Stash does not restart a long file just to
+  yield it again. Jasna has priority by design: the VRAM does not fit both.
+  Fail-open: an unreachable bridge means no Jasna. The bridge knows nothing of
+  the fleet; the coupling is one public read-only URL, deliberately, so this
+  feature stays out of the bridge repo.
 
 `runner._terminate_tree` kills the child's whole **process group** (children are
 spawned with `start_new_session=True`), because WhisperJAV spawns helpers that

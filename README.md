@@ -131,9 +131,39 @@ sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-agent
 | `ollama_unload_on_abort` | On any abort, ask Ollama to drop the job's translate model from VRAM (`false` by default). See "Notes and limits" below. |
 | `ollama_url` | Where that request goes. Default `http://127.0.0.1:11434`. |
 | `storage_retry_seconds` | When the media share itself becomes unreachable (host down, stale mount), the item in hand is requeued rather than failed and the agent stops claiming for this long before trying again. Default `60`. |
+| `gpu_hold_url` | Blank = off. The stash-jasna-bridge health URL, e.g. `http://127.0.0.1:8770/jasna/health`. While Jasna needs the GPU the agent stays off it. See "Sharing the GPU with Jasna". |
+| `gpu_hold_mode` | `yield` (default): abort and requeue the file in hand the moment Jasna starts. `finish`: let the current file complete, only stop claiming new ones. |
+| `gpu_hold_while_resident` | Also hold while the Jasna *process* is resident (it keeps its models in VRAM until the bridge's idle stop), not only while someone is watching. Default `true`. |
+| `gpu_hold_poll_seconds` / `gpu_hold_release_seconds` | How often to re-check (`3`), and how long the hold must stay clear before claiming resumes (`30`), so a quick OFF/ON does not restart a long file just to yield it again. |
 
 Every field can also come from the environment: `FLEET_HUB_URL`,
-`FLEET_AGENT_ID`, `FLEET_HUB_USER`, `FLEET_HUB_PASS`, `WHISPERJAV_BIN`.
+`FLEET_AGENT_ID`, `FLEET_HUB_USER`, `FLEET_HUB_PASS`, `WHISPERJAV_BIN`,
+`FLEET_GPU_HOLD_URL`.
+
+### Sharing the GPU with Jasna
+
+On a machine that also runs [Jasna](https://github.com/Kruk2/jasna) through
+[stash-jasna-bridge](https://github.com/org0ne/stash-jasna-bridge), the two do
+not fit on one card together: Jasna's hq preset is ~14 GB and the Ollama
+translate model ~9 GB more, on a 24 GB GPU. So Jasna wins. Set `gpu_hold_url`
+to the bridge's health endpoint (no auth needed) and the agent:
+
+- **does not claim** a file while a viewer session is active or starting, or
+  while the Jasna process is still resident holding VRAM;
+- in `yield` mode, **aborts the file in hand** within a few seconds of Jasna
+  starting, kills whisperjav's process group, asks Ollama to unload the
+  translate model (`ollama_unload_on_abort: true` recommended), and requeues
+  the file as "yielded to Jasna"; the dashboard shows the agent as *holding*;
+- **resumes on its own** once the bridge reports Jasna gone for
+  `gpu_hold_release_seconds`.
+
+It is a race, not a lock: the bridge flags `preparing` before Jasna loads its
+models, and the agent polls every `gpu_hold_poll_seconds`, so VRAM is usually
+free in time. If it is not, the toggle in Stash errors once and works on retry.
+Two knobs outside this repo tighten it: a shorter `process_idle_minutes` in the
+bridge config so a lingering Jasna frees the card sooner, and a short
+`OLLAMA_KEEP_ALIVE` on the Ollama service. An unreachable bridge is treated as
+"no Jasna", so the agent keeps working if the bridge is down.
 
 ---
 
