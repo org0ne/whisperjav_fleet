@@ -347,6 +347,28 @@ async function refresh() {
   }
 }
 
+// "Jasna-aware": the agent yields the GPU to Jasna (stash-jasna-bridge) and
+// echoes what the bridge last published, so the card shows the bridge is
+// really being read - version, preset, running/streaming, scene - not just
+// that a URL is configured. Media paths are never sent by the agent.
+function jasnaBits(a, j) {
+  if (!j.aware) return { cls: "off", pill: "jasna: off", tip: "gpu_hold_url not set on this agent", row: "" };
+  const b = j.bridge || {};
+  // Most useful first: the row truncates on narrow cards (full text in the tooltip).
+  const facts = [];
+  if (b.preset)    facts.push("preset " + b.preset);
+  if (b.scene_id)  facts.push("scene " + b.scene_id + (b.from_cache ? " (cache)" : ""));
+  facts.push(b.streaming ? "streaming" : b.running ? "running" : "not running");
+  if (b.warm && !b.running) facts.push("warm");
+  if (b.version)   facts.push("bridge " + b.version);
+  const probed = (j.probed_ago == null) ? "" : " · probed " + Math.round(j.probed_ago) + "s ago";
+  const tip = "Jasna-aware (" + (j.mode || "yield") + " mode) via " + (j.url || "") + probed;
+  if (!a.online)      return { cls: "off",  pill: "jasna: aware", tip, row: esc(facts.join(" · ")) };
+  if (!j.reachable)   return { cls: "err",  pill: "jasna: bridge down", tip: tip + " - the bridge did not answer; agent works normally", row: "bridge unreachable" };
+  if (j.held)         return { cls: "warn", pill: "holding for jasna", tip: tip + " - " + (j.reason || ""), row: esc((j.reason || "held") + " · " + facts.join(" · ")) };
+  return { cls: "ok", pill: "jasna: aware", tip, row: esc(facts.join(" · ")) };
+}
+
 function renderAgents() {
   const el = $("agents");
   if (!STATE.agents.length) {
@@ -360,15 +382,21 @@ function renderAgents() {
     let cls = "off", txt = "offline";
     if (a.online && a.paused)      { cls = "warn"; txt = "paused"; }
     else if (a.online && cur.file) { cls = "run";  txt = "working"; }
+    else if (a.online && s.state === "holding") { cls = "warn"; txt = "holding"; }
     else if (a.online)             { cls = "ok";   txt = "idle"; }
     const c = s.counts || {};
+    const jz = jasnaBits(a, s.jasna || {});
     return '<div class="card">' +
-      '<h3>' + esc(a.agent_id) + '<span class="pill ' + cls + '">' + txt + '</span><span class="spacer"></span></h3>' +
+      '<h3>' + esc(a.agent_id) + '<span class="pill ' + cls + '">' + txt + '</span>' +
+        '<span class="pill ' + jz.cls + '" title="' + esc(jz.tip) + '">' + jz.pill + '</span>' +
+        '<span class="spacer"></span></h3>' +
       '<div class="kv">' +
         '<span>WhisperJAV</span><b class="trunc">' + esc(s.whisperjav || "?") + '</b>' +
         '<span>Platform</span><b>' + esc(s.platform || "?") + '</b>' +
         '<span>Last seen</span><b>' + a.last_seen_ago.toFixed(0) + 's ago</b>' +
-        '<span>This run</span><b>' + (c.done||0) + ' done · ' + (c.failed||0) + ' failed · ' + (c.skipped||0) + ' skipped</b>' +
+        '<span>This run</span><b>' + (c.done||0) + ' done · ' + (c.failed||0) + ' failed · ' + (c.skipped||0) + ' skipped' +
+          ((c.yielded||0) ? ' · <span style="color:var(--warn)">' + c.yielded + ' yielded to Jasna</span>' : '') + '</b>' +
+        (jz.row ? '<span>Jasna</span><b class="trunc" title="' + esc(jz.tip) + '">' + jz.row + '</b>' : '') +
       '</div>' +
       (cur.file
         ? '<div class="kv" style="margin-top:8px">' +

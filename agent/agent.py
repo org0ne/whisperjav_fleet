@@ -181,6 +181,9 @@ class GpuHold:
         self._last_held_at = 0.0
         self._lock = threading.Lock()
         self._warned_unreachable = False
+        self.reachable = False
+        self.last_probe_at = 0.0
+        self.bridge: dict = {}   # what the bridge last published (no filesystem paths)
 
     @property
     def enabled(self) -> bool:
@@ -200,8 +203,30 @@ class GpuHold:
             if not self._warned_unreachable:
                 log(f"gpu hold: bridge unreachable ({exc}); assuming Jasna is not running", "WARN")
                 self._warned_unreachable = True
+            with self._lock:
+                self.reachable = False
+                self.last_probe_at = time.time()
             return self._set(False, "")
         jasna = data.get("jasna") or {}
+        session = data.get("session") or {}
+        preparing = data.get("preparing") or {}
+        stream = data.get("stream") or {}
+        with self._lock:
+            self.reachable = True
+            self.last_probe_at = time.time()
+            # Echo the bridge's own facts on the dashboard, deliberately without
+            # session/stream *paths* (media filenames stay off the hub).
+            self.bridge = {
+                "version":   data.get("version"),
+                "running":   bool(jasna.get("running")),
+                "streaming": bool(jasna.get("streaming")),
+                "warm":      bool(jasna.get("warm")),
+                "preset":    jasna.get("preset") or session.get("preset") or stream.get("preset"),
+                "scene_id":  session.get("scene_id") or preparing.get("scene_id"),
+                "viewer":    bool(data.get("active")),
+                "preparing": bool(preparing),
+                "from_cache": bool(session.get("from_cache")),
+            }
         if data.get("active"):
             return self._set(True, "viewer active")
         if data.get("preparing"):
@@ -219,6 +244,23 @@ class GpuHold:
         if changed:
             log(f"gpu hold: {'HELD (' + reason + ')' if held else 'released'}")
         return held, reason
+
+    def summary(self) -> dict:
+        """For the agent's check-in: is this agent Jasna-aware, and what did the
+        bridge last say. Rendered on the hub's agent card."""
+        if not self.enabled:
+            return {"aware": False}
+        with self._lock:
+            return {
+                "aware":      True,
+                "mode":       self.mode,
+                "url":        self.url,
+                "reachable":  self.reachable,
+                "held":       self.held,
+                "reason":     self.reason,
+                "probed_ago": round(time.time() - self.last_probe_at, 1) if self.last_probe_at else None,
+                "bridge":     dict(self.bridge),
+            }
 
     def blocking(self) -> bool:
         """True while new files must not be claimed: held now, or released less
@@ -265,6 +307,7 @@ class Agent:
             "host":        socket.gethostname(),
             "state":       "working" if self.current else ("holding" if held else "idle"),
             "gpu_hold":    self._gpu_hold.reason if held else "",
+            "jasna":       self._gpu_hold.summary(),
             "current":     self.current,
             "progress":    self._progress[:300],
             "counts":      dict(self.counts),
