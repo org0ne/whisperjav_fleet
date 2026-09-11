@@ -52,6 +52,12 @@
 
   .card { background:var(--panel2); border:1px solid var(--line); border-radius:var(--radius); padding:14px; }
   .card h3 { margin:0 0 8px; font-size:14px; display:flex; align-items:center; gap:8px; }
+  /* Agent cards: a flex column with the buttons pinned to the bottom, so the
+     button rows line up across cards whose bodies differ in height (one is
+     working with a file and a progress line, another is idle). The grid
+     already stretches every card in a row to the same height. */
+  .card.agent { display:flex; flex-direction:column; }
+  .card.agent .btns { margin-top:auto; padding-top:10px; }
   .card h3 .spacer { flex:1; }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; font-size:12px; color:var(--dim); }
   .kv b { color:var(--text); font-weight:500; }
@@ -543,7 +549,7 @@ function renderAgents() {
     const ignoring = a.ignore_jasna && (a.status && a.status.jasna && a.status.jasna.aware);
     const c = s.counts || {};
     const jz = jasnaBits(a, s.jasna || {});
-    return '<div class="card">' +
+    return '<div class="card agent">' +
       '<h3>' + esc(a.agent_id) + '<span class="pill ' + cls + '">' + txt + '</span>' +
         '<span class="pill ' + jz.cls + '" title="' + esc(jz.tip) + '">' + jz.pill + '</span>' +
         '<span class="spacer"></span></h3>' +
