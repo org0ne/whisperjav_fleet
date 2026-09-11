@@ -548,9 +548,11 @@ function addMinutes(hhmm, mins) {
 }
 
 // One label/value row of an agent card's key-value grid. An empty value
-// renders as a ghost row (invisible, same height) so cards stay aligned.
-function row(label, html, attrs) {
-  if (!html) return '<span class="ghost">' + label + '</span><b class="ghost">&nbsp;</b>';
+// renders as a ghost row (invisible, same height) so cards stay aligned --
+// but only when `reserve` says some other card has this row; a row nobody
+// has is left out everywhere rather than shown as a blank line on every card.
+function row(label, html, attrs, reserve = true) {
+  if (!html) return reserve ? '<span class="ghost">' + label + '</span><b class="ghost">&nbsp;</b>' : '';
   return '<span>' + label + '</span><b ' + (attrs || '') + '>' + html + '</b>';
 }
 
@@ -561,6 +563,16 @@ function renderAgents() {
       '<code>agent.py</code> on a worker machine and it will appear here within a few seconds.</div>';
     return;
   }
+  // Which optional sections does *any* card need? Only those are reserved
+  // (as ghosts) on the cards that lack them.
+  const any = {
+    gpu:   STATE.agents.some(a => a.online && a.status && a.status.gpu && a.status.gpu.mem_total),
+    jasna: STATE.agents.some(a => jasnaBits(a, (a.status || {}).jasna || {}).row),
+    hold:  STATE.agents.some(a => (a.status || {}).fleet_hold),
+    avg:   STATE.agents.some(a => a.timing),
+    file:  STATE.agents.some(a => ((a.status || {}).current || {}).file),
+    prog:  STATE.agents.some(a => ((a.status || {}).current || {}).file && (a.status || {}).progress),
+  };
   el.innerHTML = STATE.agents.map(a => {
     const s = a.status || {};
     const cur = s.current || {};
@@ -576,7 +588,7 @@ function renderAgents() {
       '<h3>' + esc(a.agent_id) + '<span class="pill ' + cls + '">' + txt + '</span>' +
         '<span class="pill ' + jz.cls + '" title="' + esc(jz.tip) + '">' + jz.pill + '</span>' +
         '<span class="spacer"></span></h3>' +
-      gpuBits(a.online ? s.gpu : null) +
+      (any.gpu ? gpuBits(a.online ? s.gpu : null) : "") +
       '<div class="kv">' +
         row('WhisperJAV', esc(s.whisperjav || "?"), 'class="trunc"') +
         row('Platform', esc(s.platform || "?")) +
@@ -590,18 +602,22 @@ function renderAgents() {
                 ' <span style="color:var(--dim)">· ' + a.timing.done_total + ' done</span>'
               : '',
             'class="trunc" title="Mean time from start to finish per file, over every file this agent has completed that is still on the hub' +
-              (a.timing && a.timing.recent_n ? '; in brackets, the mean of its most recent ' + a.timing.recent_n : '') + '."') +
-        row('Jasna', jz.row, 'class="trunc" title="' + esc(jz.tip) + '"') +
+              (a.timing && a.timing.recent_n ? '; in brackets, the mean of its most recent ' + a.timing.recent_n : '') + '."', any.avg) +
+        row('Jasna', jz.row, 'class="trunc" title="' + esc(jz.tip) + '"', any.jasna) +
         row('Fleet hold', s.fleet_hold ? esc(s.fleet_hold) +
               (cur.file ? (STATE.hold && STATE.hold.abort_in_flight ? ' · aborting current file' : ' · finishing current file') : '') : '',
-            'class="trunc" style="color:var(--warn)" title="This agent has seen the fleet hold and is not claiming new files."') +
+            'class="trunc" style="color:var(--warn)" title="This agent has seen the fleet hold and is not claiming new files."', any.hold) +
       '</div>' +
-      '<div class="kv" style="margin-top:8px">' +
-        row('File', cur.file ? esc(cur.file) : '', 'class="trunc mono" title="' + esc(cur.file || "") + '"') +
-        row('Job', cur.file ? esc(cur.job_name || "") : '', 'class="trunc"') +
-      '</div>' +
-      '<div class="mono trunc' + (cur.file && s.progress ? '' : ' ghost') + '" style="margin-top:6px;color:var(--dim)" title="' +
-         esc(s.progress || "") + '">' + (cur.file && s.progress ? esc(s.progress) : '&nbsp;') + '</div>' +
+      (any.file
+        ? '<div class="kv" style="margin-top:8px">' +
+            row('File', cur.file ? esc(cur.file) : '', 'class="trunc mono" title="' + esc(cur.file || "") + '"') +
+            row('Job', cur.file ? esc(cur.job_name || "") : '', 'class="trunc"') +
+          '</div>'
+        : "") +
+      (any.prog
+        ? '<div class="mono trunc' + (cur.file && s.progress ? '' : ' ghost') + '" style="margin-top:6px;color:var(--dim)" title="' +
+            esc(s.progress || "") + '">' + (cur.file && s.progress ? esc(s.progress) : '&nbsp;') + '</div>'
+        : "") +
       '<div class="btns">' +
         '<button class="' + (a.paused ? "ok" : "warn") + '" title="' + (a.paused
             ? "Let this agent resume claiming files."
