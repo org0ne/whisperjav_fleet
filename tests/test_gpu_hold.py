@@ -63,6 +63,7 @@ class FakeHub:
     def __init__(self, item):
         self.item = item
         self.ignore_jasna = False
+        self.hold = None            # fleet hold dict the hub would return, or None
         self.claims = 0
         self.heartbeats = 0
         self.requeues: list[str] = []
@@ -84,13 +85,17 @@ class FakeHub:
                 path = self.path
                 with hub.lock:
                     if path.endswith("/checkin"):
-                        return self._json({"paused": False, "ignore_jasna": hub.ignore_jasna, "browse": None, "scan": None})
+                        return self._json({"paused": False, "ignore_jasna": hub.ignore_jasna,
+                                           "hold": hub.hold, "browse": None, "scan": None})
                     if path.endswith("/claim"):
                         hub.claims += 1
                         item, hub.item = hub.item, None   # hand it out once
                         return self._json({"item": item})
                     if path.endswith("/heartbeat"):
                         hub.heartbeats += 1
+                        if hub.hold and hub.hold.get("abort_in_flight"):
+                            return self._json({"ok": True, "abort": True,
+                                               "reason": "fleet hold: " + hub.hold.get("reason", "")})
                         return self._json({"ok": True, "abort": False, "reason": ""})
                     if path.endswith("/requeue"):
                         hub.requeues.append(payload.get("reason", ""))

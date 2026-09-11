@@ -131,6 +131,14 @@
   }
   .picker div:hover { background:var(--panel2); color:var(--accent); }
   .empty { color:var(--dim); font-size:13px; padding:6px 0; }
+  .holdbar {
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:10px 14px;
+    border:1px solid #5c451a; background:#2b2110; color:var(--warn); border-radius:var(--radius);
+    font-size:13px;
+  }
+  .holdbar b { color:var(--text); font-weight:600; }
+  .holdbar .sub { color:color-mix(in srgb, var(--warn) 70%, var(--dim)); font-size:12px; }
+  .holdbar .spacer { flex:1; }
   .hint { font-size:11px; color:var(--dim); margin-top:4px; }
   code { font-family:var(--mono); font-size:11px; background:var(--bg); padding:1px 4px; border-radius:4px; }
 </style>
@@ -146,8 +154,15 @@
 
 <main>
 
+  <div id="holdBar" class="holdbar" hidden></div>
+
   <section>
-    <h2>Machines</h2>
+    <h2>Machines
+      <span id="winPill" class="pill off" hidden></span>
+      <span class="spacer"></span>
+      <button title="A daily window (hub local time) during which the fleet is held, covering the whole SnapRAID maintenance sequence: spin-up, sync, scrub, spin-down, probe, report." onclick="openWindow()">Maintenance window…</button>
+      <button id="holdBtn" class="warn" title="Hold the fleet now, until you release it or it times out. Independent of the per-agent Pause buttons." onclick="openHold()">Hold fleet…</button>
+    </h2>
     <div class="body"><div id="agents" class="grid"></div></div>
   </section>
 
@@ -313,11 +328,57 @@
   </div>
 </dialog>
 
+<dialog id="holdDlg">
+  <h2>Hold the fleet</h2>
+  <div class="body">
+    <p style="margin:0 0 12px;font-size:13px;color:var(--dim)">
+      No agent claims a new file while the hold is on. Whatever is already transcribing
+      runs to completion. The hold lifts by itself when the time below runs out, so a
+      forgotten hold cannot park the fleet indefinitely.
+    </p>
+    <div class="field"><label>Reason (shown on every machine)</label>
+      <input type="text" id="hReason" placeholder="e.g. disk swap, manual snapraid sync"></div>
+    <div class="field"><label>Lifts automatically after (hours)</label>
+      <input type="number" id="hHours" value="6" min="0.1" step="0.5"></div>
+    <label class="check"><input type="checkbox" id="hAbort"> Also abort files in progress (they are requeued; nothing partial is written)</label>
+    <div class="btns" style="justify-content:flex-end">
+      <button onclick="holdDlg.close()">Cancel</button>
+      <button class="primary warn" onclick="saveHold()">Hold</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="winDlg">
+  <h2>Daily maintenance window</h2>
+  <div class="body">
+    <p style="margin:0 0 12px;font-size:13px;color:var(--dim)">
+      Every day, for this window, the fleet is held: no new files are claimed and,
+      if ticked, files in progress are aborted and requeued. Use it to cover a
+      SnapRAID maintenance run end to end — spin-up, sync, scrub, spin-down, probe,
+      report — with margin. Times are the hub's local time
+      (<span id="winTz" class="mono"></span>). The hook script only sees sync and
+      scrub, so keep this as the floor and let the hook extend past it when a run
+      overflows.
+    </p>
+    <label class="check" style="margin-bottom:12px"><input type="checkbox" id="wEnabled"> Enabled</label>
+    <div class="row">
+      <div class="field"><label>Starts at (HH:MM)</label><input type="text" id="wStart" placeholder="02:55" class="mono"></div>
+      <div class="field"><label>Duration (minutes)</label><input type="number" id="wMinutes" min="1" max="1440"></div>
+    </div>
+    <div class="field"><label>Reason (shown on every machine)</label><input type="text" id="wReason"></div>
+    <label class="check"><input type="checkbox" id="wAbort"> Abort files in progress when the window opens</label>
+    <div class="btns" style="justify-content:flex-end">
+      <button onclick="winDlg.close()">Cancel</button>
+      <button class="primary" onclick="saveWindow()">Save</button>
+    </div>
+  </div>
+</dialog>
+
 <script>
 // ---------------------------------------------------------------------------
 // State + helpers
 // ---------------------------------------------------------------------------
-let STATE = { agents: [], jobs: [], events: [], profiles: [] };
+let STATE = { hold: null, hold_window: null, agents: [], jobs: [], events: [], profiles: [] };
 
 const $  = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
@@ -353,7 +414,7 @@ async function refresh() {
     $("agentSummary").className = "pill ok";
     $("agentSummary").textContent = on + "/" + STATE.agents.length + " online";
     $("clock").textContent = new Date().toLocaleTimeString();
-    renderAgents(); renderJobs(); renderProfiles(); renderLog();
+    renderHold(); renderAgents(); renderJobs(); renderProfiles(); renderLog();
   } catch (e) {
     $("agentSummary").className = "pill err";
     $("agentSummary").textContent = "hub unreachable";
@@ -418,6 +479,48 @@ function gpuBits(g) {
   '</div>';
 }
 
+// Fleet-wide hold banner. The hold is the hub's, not any one agent's: it
+// comes from an external event (contrib/snapraid-hook.sh while SnapRAID
+// syncs) or the "Hold fleet…" button, and always carries a deadline.
+function renderHold() {
+  const h = STATE.hold, w = STATE.hold_window || {}, bar = $("holdBar"), pill = $("winPill");
+  // Schedule pill on the Machines header.
+  if (w.enabled) {
+    const end = w.start && addMinutes(w.start, w.minutes);
+    pill.hidden = false;
+    pill.className = "pill " + (w.open_now ? "warn" : "off");
+    pill.textContent = "window " + w.start + "–" + end + " daily" +
+      (w.skipped_today ? " · skipped today" : (w.next_start && !w.open_now ? " · next in " + dur(w.next_start - STATE.now) : ""));
+    pill.title = "Daily maintenance hold, hub local time (" + (w.hub_tz || "?") + ", now " + (w.hub_time || "?") + "). " +
+      (w.abort_in_flight ? "Aborts files in progress." : "Files in progress finish.") + " Click Maintenance window… to change.";
+  } else { pill.hidden = true; }
+
+  $("holdBtn").hidden = !!h;
+  if (!h) { bar.hidden = true; bar.innerHTML = ""; return; }
+  const since = STATE.now - (h.set_at || STATE.now);
+  const src = (h.sources || []);
+  const what = src.includes("window") && src.includes("manual") ? "maintenance window + hold"
+             : src.includes("window") ? "scheduled maintenance window" : "hold";
+  bar.hidden = false;
+  bar.innerHTML =
+    '<span>&#9208;&#65039; <b>Fleet on ' + what + '</b> · ' + esc(h.reason || "no reason given") + '</span>' +
+    '<span class="sub">no new files are being claimed; ' +
+      (h.abort_in_flight ? 'files in progress are aborted and requeued' : 'files in progress finish') +
+      ' · since ' + dur(since) + ' ago' + (h.set_by && h.set_by !== "schedule" ? ' by ' + esc(h.set_by) : '') +
+      ' · lifts by itself in ' + dur(h.remaining) + '</span>' +
+    '<span class="spacer"></span>' +
+    '<button class="ok" title="' + (src.includes("window")
+        ? "Release now and skip the rest of today's window; the schedule resumes tomorrow. Agents you paused individually stay paused."
+        : "Let every agent claim files again. Agents you paused individually stay paused.") +
+      '" onclick="releaseHold()">' + (src.includes("window") ? "Release (skip today)" : "Release hold") + '</button>';
+}
+
+function addMinutes(hhmm, mins) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const t = ((h * 60 + m + (mins || 0)) % 1440 + 1440) % 1440;
+  return String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0");
+}
+
 function renderAgents() {
   const el = $("agents");
   if (!STATE.agents.length) {
@@ -448,6 +551,8 @@ function renderAgents() {
         '<span>This run</span><b>' + (c.done||0) + ' done · ' + (c.failed||0) + ' failed · ' + (c.skipped||0) + ' skipped' +
           ((c.yielded||0) ? ' · <span style="color:var(--warn)">' + c.yielded + ' yielded to Jasna</span>' : '') + '</b>' +
         (jz.row ? '<span>Jasna</span><b class="trunc" title="' + esc(jz.tip) + '">' + jz.row + '</b>' : '') +
+        (s.fleet_hold ? '<span>Fleet hold</span><b class="trunc" style="color:var(--warn)" title="This agent has seen the fleet hold and is not claiming new files.">' +
+            esc(s.fleet_hold) + (cur.file ? (STATE.hold && STATE.hold.abort_in_flight ? ' · aborting current file' : ' · finishing current file') : '') + '</b>' : '') +
       '</div>' +
       (cur.file
         ? '<div class="kv" style="margin-top:8px">' +
@@ -578,6 +683,53 @@ const forgetAgent = wrap(id => api("/api/agents/" + id, "DELETE"));
 const stopAgent   = wrap(id => confirm("Stop " + id + " now? Its current file will be aborted " +
   "and requeued, and the agent will pause until you resume it.") ? api("/api/agents/" + id + "/stop", "POST") : null);
 const delProfile  = wrap(id => confirm("Delete this profile?") ? api("/api/profiles/" + id, "DELETE") : null);
+const releaseHold = wrap(() => api("/api/hold", "POST", { held: false }));
+
+// -- Hold dialog -------------------------------------------------------------
+function openHold() {
+  $("hReason").value = "";
+  $("hHours").value = "6";
+  $("holdDlg").showModal();
+  $("hReason").focus();
+}
+
+async function saveHold() {
+  const hours = parseFloat($("hHours").value);
+  if (!(hours > 0)) { alert("Give the hold a positive number of hours."); return; }
+  try {
+    await api("/api/hold", "POST", {
+      held: true, reason: $("hReason").value.trim(), ttl_seconds: Math.round(hours * 3600),
+      set_by: "dashboard", abort_in_flight: $("hAbort").checked,
+    });
+    $("holdDlg").close();
+    await refresh();
+  } catch (e) { alert(e.message); }
+}
+
+// -- Maintenance window dialog -------------------------------------------------
+function openWindow() {
+  const w = STATE.hold_window || {};
+  $("wEnabled").checked = !!w.enabled;
+  $("wStart").value = w.start || "02:55";
+  $("wMinutes").value = w.minutes || 65;
+  $("wReason").value = w.reason || "maintenance window";
+  $("wAbort").checked = w.abort_in_flight !== false;
+  $("winTz").textContent = (w.hub_tz || "?") + ", now " + (w.hub_time || "?");
+  $("winDlg").showModal();
+}
+
+async function saveWindow() {
+  const minutes = parseInt($("wMinutes").value, 10);
+  if (!(minutes > 0)) { alert("Give the window a positive number of minutes."); return; }
+  try {
+    await api("/api/hold/window", "POST", {
+      enabled: $("wEnabled").checked, start: $("wStart").value.trim(), minutes,
+      reason: $("wReason").value.trim(), abort_in_flight: $("wAbort").checked,
+    });
+    $("winDlg").close();
+    await refresh();
+  } catch (e) { alert(e.message); }
+}
 
 // -- Job dialog --------------------------------------------------------------
 function openJob(preset) {

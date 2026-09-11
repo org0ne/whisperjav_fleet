@@ -45,6 +45,12 @@ HUB_PASS = os.environ.get("HUB_PASS", "")
 # A scan that produces no result in this long is handed to another agent.
 SCAN_TIMEOUT_SECONDS = 300
 
+# A fleet hold set without an explicit ttl_seconds lapses after this long.
+# Long enough for a nightly SnapRAID sync, short enough that a hook script
+# that dies before releasing does not idle the fleet for days.
+HOLD_DEFAULT_TTL_SECONDS = 6 * 3600
+HOLD_MAX_TTL_SECONDS = 7 * 24 * 3600
+
 app = FastAPI(title="WhisperJAV Fleet Hub")
 security = HTTPBasic(auto_error=False)
 
@@ -244,6 +250,7 @@ def agent_checkin(agent_id: str, status: dict, _a=Auth):
         ).fetchone()
         paused = bool(arow["paused"]) if arow else False
         ignore_jasna = bool(arow["ignore_jasna"]) if arow else False
+        hold = db.fleet_hold(conn)
 
         # --- Pending folder-browse request for this agent -------------------
         browse = conn.execute(
@@ -300,7 +307,12 @@ def agent_checkin(agent_id: str, status: dict, _a=Auth):
                     "video_extensions": json.loads(job["video_extensions"] or "[]"),
                 }
 
-    return {"paused": paused, "ignore_jasna": ignore_jasna, "browse": browse_task, "scan": scan_task}
+    # `hold` is advisory here (the claim endpoint enforces it): it lets the
+    # agent report itself as holding and skip claim round-trips.  Scans and
+    # browses still go out -- they only read the share, and a job created
+    # during a hold should be queued and ready the moment it lifts.
+    return {"paused": paused, "ignore_jasna": ignore_jasna, "hold": hold,
+            "browse": browse_task, "scan": scan_task}
 
 
 @app.post("/api/agent/{agent_id}/claim")
@@ -310,6 +322,9 @@ def agent_claim(agent_id: str, _a=Auth):
         row = conn.execute("SELECT paused FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
         if row and row["paused"]:
             return {"item": None, "reason": "agent paused"}
+        hold = db.fleet_hold(conn)
+        if hold:
+            return {"item": None, "reason": f"fleet hold: {hold['reason'] or 'no reason given'}"}
 
     item = db.claim_next(agent_id)
     if item:
@@ -352,6 +367,11 @@ def agent_heartbeat(agent_id: str, beat: ItemBeat, _a=Auth):
             return {"ok": True, "abort": True, "reason": "stopped from dashboard"}
         if job["state"] != "running":
             return {"ok": True, "abort": True, "reason": f"job is {job['state']}"}
+        hold = db.fleet_hold(conn)
+        if hold and hold["abort_in_flight"]:
+            # The fleet is held with "abort in flight": the file is put back
+            # (agent requeues it) and cannot be reclaimed until the hold lifts.
+            return {"ok": True, "abort": True, "reason": f"fleet hold: {hold['reason']}"}
 
         ok = db.heartbeat_item(conn, beat.item_id, agent_id, beat.progress)
         if not ok:
@@ -496,6 +516,7 @@ def get_state(_a=Auth):
     now = db.now()
     with db.connect() as conn:
         db.release_expired_claims(conn)
+        hold = db.fleet_hold(conn)
 
         agents = []
         for row in conn.execute("SELECT * FROM agents ORDER BY agent_id"):
@@ -551,7 +572,10 @@ def get_state(_a=Auth):
             p["video_extensions"] = json.loads(p["video_extensions"] or "[]")
             profiles.append(p)
 
-    return {"now": now, "agents": agents, "jobs": jobs, "events": events, "profiles": profiles}
+        hold_window = db.hold_window(conn)
+
+    return {"now": now, "hold": hold, "hold_window": hold_window, "agents": agents, "jobs": jobs,
+            "events": events, "profiles": profiles}
 
 
 @app.get("/api/jobs/{job_id}/items")
@@ -743,6 +767,111 @@ def delete_job(job_id: int, _a=Auth):
         conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         db.log_event(conn, f"Job {job_id} deleted")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Fleet hold
+# ---------------------------------------------------------------------------
+
+class HoldIn(BaseModel):
+    held: bool = True
+    reason: str = ""
+    ttl_seconds: Optional[float] = None
+    set_by: str = ""
+    abort_in_flight: bool = False   # also abort (requeue) files in progress
+    extend_only: bool = False       # never move an existing deadline earlier
+
+
+class HoldWindowIn(BaseModel):
+    enabled: bool
+    start: str = "02:55"            # HH:MM, hub local time
+    minutes: int = 65
+    reason: str = "maintenance window"
+    abort_in_flight: bool = True
+
+
+@app.get("/api/hold")
+def get_hold(_a=Auth):
+    with db.connect() as conn:
+        return {"hold": db.fleet_hold(conn)}
+
+
+@app.post("/api/hold")
+def set_hold(body: HoldIn, _a=Auth):
+    """
+    Fleet-wide hold: stop every agent from claiming new files, and with
+    `abort_in_flight` also abort and requeue the ones in progress (nothing
+    partial is ever written, so that is always safe).  Built for external
+    events that want the array quiet -- the bundled contrib/snapraid-hook.sh
+    sets it when a SnapRAID task begins and extends it past the last one --
+    and for a manual hold from the dashboard.  The daily scheduled window
+    (/api/hold/window) is the other source; fleet_hold() merges the two.
+
+    Independent of per-agent Pause on purpose: releasing the hold never
+    un-pauses an agent someone paused by hand, and vice versa.
+
+    The hold always carries a deadline (`ttl_seconds`, default
+    HOLD_DEFAULT_TTL_SECONDS).  That is the fail-open half of the contract:
+    if the releaser never calls back, the fleet resumes on its own.
+    Setting an active hold again just moves the deadline.
+    """
+    with db.connect() as conn:
+        if body.held:
+            ttl = body.ttl_seconds if body.ttl_seconds is not None else HOLD_DEFAULT_TTL_SECONDS
+            if not (0 < ttl <= HOLD_MAX_TTL_SECONDS):
+                raise HTTPException(400, f"ttl_seconds must be between 1 and {HOLD_MAX_TTL_SECONDS}")
+            before = db.fleet_hold(conn)
+            hold = db.set_fleet_hold(conn, body.reason.strip(), ttl, body.set_by.strip(),
+                                     abort_in_flight=body.abort_in_flight,
+                                     extend_only=body.extend_only)
+            if before and before["until"] >= hold["until"] and before["reason"] == hold["reason"]:
+                pass    # extend_only against a longer hold: nothing changed worth logging
+            else:
+                span = (f"{ttl / 3600:g} h" if ttl >= 3600 else
+                        f"{int(ttl // 60)} min" if ttl >= 60 else f"{int(ttl)} s")
+                db.log_event(conn, (f"Fleet hold {'extended' if before else 'set'}: "
+                                    f"{body.reason.strip() or 'no reason given'} "
+                                    f"(lifts in {span} unless released"
+                                    f"{'; aborting files in progress' if body.abort_in_flight else ''})"),
+                             level="warn")
+        else:
+            released = db.clear_fleet_hold(conn)
+            if "window" in released:
+                db.log_event(conn, "Fleet hold released; today's maintenance window skipped")
+            elif released:
+                db.log_event(conn, "Fleet hold released")
+            hold = db.fleet_hold(conn)
+    return {"ok": True, "hold": hold}
+
+
+@app.get("/api/hold/window")
+def get_hold_window(_a=Auth):
+    with db.connect() as conn:
+        return {"window": db.hold_window(conn)}
+
+
+@app.post("/api/hold/window")
+def set_hold_window(body: HoldWindowIn, _a=Auth):
+    """
+    A daily hold window in the hub's local time: the belt to the hook
+    script's braces.  snapraidd only fires hooks around sync/scrub/diff/
+    check/fix, not around spin-up, spin-down, probe or report, so a fixed
+    window is the one way to cover the whole maintenance sequence.  Saving
+    the schedule also forgets any "skip today" the Release button recorded.
+    """
+    with db.connect() as conn:
+        try:
+            win = db.set_hold_window(conn, enabled=body.enabled, start=body.start, minutes=body.minutes,
+                                     reason=body.reason, abort_in_flight=body.abort_in_flight)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        if win["enabled"]:
+            db.log_event(conn, (f"Maintenance window set: daily {win['start']} for {win['minutes']} min "
+                                f"({win['hub_tz']}); {win['reason']}"
+                                f"{'; aborting files in progress' if win['abort_in_flight'] else ''}"))
+        else:
+            db.log_event(conn, "Maintenance window disabled")
+    return {"ok": True, "window": win}
 
 
 @app.post("/api/agents/{agent_id}/pause")

@@ -167,6 +167,74 @@ bridge config so a lingering Jasna frees the card sooner, and a short
 
 ---
 
+### Holding the fleet through SnapRAID maintenance
+
+If the media share sits on a SnapRAID array managed by
+[snapraid-daemon](https://github.com/amadvance/snapraid-daemon), two
+mechanisms together keep the fleet off the array for the *whole* nightly
+sequence — spin-up, sync, scrub, probe, spin-down, report — not just the
+sync:
+
+1. **A daily maintenance window on the hub** (dashboard: **Maintenance
+   window…** on the Machines panel, or `POST /api/hold/window`). Hub local
+   time, e.g. `02:55` for `65` minutes around a 03:00 `maintenance_schedule`.
+   This is the floor: it covers the fixed slot whether or not anything
+   fires, including the spin-up before sync and the spin-down after scrub
+   that snapraidd never tells a hook about. By default it also **aborts
+   files in progress** when it opens (they requeue; nothing partial is
+   written) — the intent is that nothing is transcribing during
+   maintenance, and a file claimed at 02:50 would otherwise run through the
+   entire sync. Untick it to let in-flight files finish instead.
+   **Release (skip today)** on the banner sits out the rest of one
+   occurrence; the schedule fires again tomorrow.
+
+2. **The hook script** [`contrib/snapraid-hook.sh`](contrib/snapraid-hook.sh)
+   as snapraidd's `hook_script`, which makes the hold *grow* with the array.
+   The daemon runs it around sync/scrub (and diff/check/fix); the script
+   only ever sets or extends the hold, never releases it: a task's begin
+   arms `HOLD_TTL_SECONDS` (2 h), and its end extends the hold
+   `HOLD_TAIL_SECONDS` (15 min) past the last hooked task to cover probe,
+   spin-down and report. Every call is extend-only, so it can never cut the
+   window or a manual hold short. When a sync one day outgrows the window,
+   the hook is what keeps the fleet held until it is done.
+
+On the SnapRAID host:
+
+```bash
+sudo install -o root -g root -m 0755 contrib/snapraid-hook.sh /usr/local/bin/snapraid-hook.sh
+sudo nano /usr/local/bin/snapraid-hook.sh   # set HUB_URL (and HUB_USER/HUB_PASS if the hub has auth)
+```
+
+Then in `snapraidd.conf`:
+
+```
+hook_script = /usr/local/bin/snapraid-hook.sh
+# optional: arm the hold before the disks even spin up, not once sync begins
+notify_start = /usr/local/bin/snapraid-hook.sh maintenance-start
+```
+
+and reload the daemon (SIGHUP). Points worth knowing:
+
+- **The script always exits 0.** snapraid-daemon aborts a task whose
+  `task-begin` hook fails, and a hub that is down must never cancel the sync.
+  An unreachable hub is logged to syslog and the sync proceeds unheld.
+- **Fail-open, both halves.** The window closes on the clock; the hook's
+  hold carries a deadline. Neither needs a release call to arrive, so a
+  host that reboots mid-sync or a hub that is unreachable at the end cannot
+  park the fleet for longer than the later deadline.
+- **`HOLD_COMMANDS`** defaults to `sync scrub`. `diff`, `check` and `fix`
+  are also hooked; add them if you run those on a schedule.
+- **Daemon rules.** The script must be root- or daemon-owned, not group- or
+  world-writable, executable, without setuid, and a single hard link; the
+  `install` line above satisfies them. The daemon scrubs the environment
+  before running it, so settings live in the script or in
+  `/usr/local/etc/snapraid-hook.conf`, which it sources if present.
+- **Time zones.** The window runs on the hub's clock; the dialog shows the
+  hub's zone and current time so a UTC container is obvious. Set `TZ` in
+  the hub's service environment if it should follow the NAS.
+
+The hold is generic: anything that can POST JSON can use it (see below).
+
 ## Using it
 
 **Jobs.** A job is a target folder plus the exact WhisperJAV arguments to run
@@ -195,6 +263,36 @@ files — whatever it's already transcribing keeps running to completion.
 requeue as above, nothing partial written) and pauses the agent, freeing its
 GPU without waiting for that file to finish — handy when you need the compute
 for something else. Click **Resume** when you want it back in the pool.
+
+**Hold the fleet (SnapRAID maintenance, disk swaps, …).** **Hold fleet…**
+on the Machines panel and `POST /api/hold` stop *every* agent from claiming
+new files at once, without touching the per-machine Pause state: releasing
+the hold never resumes a machine you paused by hand. By default files
+already transcribing run to completion; with `abort_in_flight` they are
+aborted and requeued instead (nothing partial is ever written, so this is
+always safe — it costs the GPU time spent so far). Every hold carries a
+deadline (default 6 h) and lifts by itself when it passes, so a caller that
+never gets to release cannot park the fleet indefinitely. Scans and folder
+browses still run during a hold; they only read the share, and a job created
+while held is queued and ready the moment it lifts. A daily scheduled window
+(`/api/hold/window`) is the second source; the two merge — held while either
+is active, until the later deadline, aborting if either says so. See
+"Holding the fleet through SnapRAID maintenance" above.
+
+```bash
+curl -X POST http://hub:8787/api/hold -H 'Content-Type: application/json' \
+     -d '{"held": true, "reason": "disk swap", "ttl_seconds": 7200, "abort_in_flight": false, "set_by": "scott"}'
+curl -X POST http://hub:8787/api/hold -H 'Content-Type: application/json' -d '{"held": false}'
+curl http://hub:8787/api/hold          # {"hold": {...}} or {"hold": null}
+curl -X POST http://hub:8787/api/hold/window -H 'Content-Type: application/json' \
+     -d '{"enabled": true, "start": "02:55", "minutes": 65, "reason": "snapraid maintenance", "abort_in_flight": true}'
+```
+
+Setting an active hold again moves its deadline and updates the reason;
+`"extend_only": true` lets a caller only ever move the deadline *later*, which
+is how the hook script layers on top of the window without shortening it.
+`{"held": false}` releases whatever is holding right now — the ad-hoc hold,
+and, if the window is open, the rest of today's occurrence.
 
 **Re-running is free.** A rescan skips any video that already has its
 `.<lang>.srt`, exactly like the batch script. Point a job at a large tree

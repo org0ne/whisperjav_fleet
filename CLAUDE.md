@@ -236,6 +236,31 @@ sweep would silently no-op.
   regardless of the flag — auto-cleanup must never delete the one thing
   (the failing item's error text) someone would want to look at.
 
+- **`fleet_hold`** is a single-row table holding two sources of a
+  fleet-wide "claim nothing new" switch, merged by `db.fleet_hold()` (the one
+  reader; held while either is active, until the later deadline,
+  `abort_in_flight` if either says so): an **ad-hoc hold** with a mandatory
+  deadline (`held_until`), and a **daily window** (`window_*`, hub local
+  time; `window_bounds` checks today's and yesterday's start so it survives
+  midnight). `fleet_hold()` also clears a lapsed ad-hoc hold lazily (the hub
+  has no timers) and logs that it expired without release. The hold gates
+  `agent_claim`, rides along in the check-in response so agents show as
+  *holding* and skip claim round-trips, and with `abort_in_flight` makes
+  `agent_heartbeat` return `abort` so the in-flight file is requeued (the
+  agent echoes the hub's reason into the requeue). It never blocks scans or
+  browses (read-only). **Deliberately separate from `agents.paused`**:
+  releasing the hold must never un-pause an agent someone paused by hand.
+  `clear_fleet_hold` releases *whatever holds now*: the ad-hoc hold, and one
+  occurrence of the window via `window_skip_until` (the schedule itself
+  stays). `set_fleet_hold(extend_only=True)` can only move the deadline
+  later — `contrib/snapraid-hook.sh` relies on it to layer on the window
+  without ever shortening it. That script never releases: snapraidd fires
+  hooks only around sync/scrub/diff/check/fix, not spin-up/spin-down/probe/
+  report, so it arms on `task-begin` and extends a tail past `task-end`/
+  `task-error`; the window is the floor that covers the unhooked steps. It
+  must always exit 0 because a failing `task-begin` hook aborts the SnapRAID
+  task. Both halves are fail-open by deadline; nothing has to call back.
+
 ### Constraints to preserve
 
 - **The agent must stay standard-library only** — workers install nothing beyond

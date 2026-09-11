@@ -194,6 +194,33 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             result_json TEXT NOT NULL DEFAULT '{}',
             created_at  REAL NOT NULL
         );
+
+        -- Fleet-wide hold: a single row.  While a hold is active no agent is
+        -- handed new work (and, with abort_in_flight, files in progress are
+        -- aborted and requeued).  Two sources, merged by fleet_hold():
+        --   * an ad-hoc hold with a deadline (`held_until`), set by an
+        --     external event -- a SnapRAID sync starting -- or by hand.  The
+        --     deadline is what makes it fail-open: a releaser that never
+        --     calls back cannot park the fleet forever;
+        --   * a daily window (`window_*`), hub local time, for a maintenance
+        --     slot that must be covered whether or not any event fires.
+        --     `window_skip_until` is the end of one occurrence to sit out
+        --     (dashboard "Release" during a window = skip today only).
+        CREATE TABLE IF NOT EXISTS fleet_hold (
+            id                INTEGER PRIMARY KEY CHECK (id = 1),
+            reason            TEXT NOT NULL DEFAULT '',
+            held_until        REAL NOT NULL DEFAULT 0,
+            set_at            REAL NOT NULL DEFAULT 0,
+            set_by            TEXT NOT NULL DEFAULT '',
+            abort_in_flight   INTEGER NOT NULL DEFAULT 0,
+            window_enabled    INTEGER NOT NULL DEFAULT 0,
+            window_start      TEXT NOT NULL DEFAULT '02:55',
+            window_minutes    INTEGER NOT NULL DEFAULT 65,
+            window_reason     TEXT NOT NULL DEFAULT 'maintenance window',
+            window_abort      INTEGER NOT NULL DEFAULT 1,
+            window_skip_until REAL NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO fleet_hold (id) VALUES (1);
         """
     )
 
@@ -217,6 +244,19 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE agents ADD COLUMN abort_requested INTEGER NOT NULL DEFAULT 0")
     if "ignore_jasna" not in agent_cols:
         conn.execute("ALTER TABLE agents ADD COLUMN ignore_jasna INTEGER NOT NULL DEFAULT 0")
+
+    hold_cols = {row["name"] for row in conn.execute("PRAGMA table_info(fleet_hold)")}
+    if "window_enabled" not in hold_cols:
+        for ddl in (
+            "abort_in_flight   INTEGER NOT NULL DEFAULT 0",
+            "window_enabled    INTEGER NOT NULL DEFAULT 0",
+            "window_start      TEXT NOT NULL DEFAULT '02:55'",
+            "window_minutes    INTEGER NOT NULL DEFAULT 65",
+            "window_reason     TEXT NOT NULL DEFAULT 'maintenance window'",
+            "window_abort      INTEGER NOT NULL DEFAULT 1",
+            "window_skip_until REAL NOT NULL DEFAULT 0",
+        ):
+            conn.execute(f"ALTER TABLE fleet_hold ADD COLUMN {ddl}")
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +292,202 @@ def log_event(conn: sqlite3.Connection, message: str, *,
 # ---------------------------------------------------------------------------
 # The claim -- the core of the double-processing guard
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Fleet hold
+# ---------------------------------------------------------------------------
+
+def parse_hhmm(text: str) -> Optional[tuple[int, int]]:
+    try:
+        hh, mm = (int(x) for x in str(text).strip().split(":"))
+    except ValueError:
+        return None
+    if 0 <= hh < 24 and 0 <= mm < 60:
+        return hh, mm
+    return None
+
+
+def window_bounds(start_hhmm: str, minutes: int, t: float) -> Optional[tuple[float, float]]:
+    """
+    (start, end) epoch seconds of the daily window occurrence that contains
+    local time `t`, or None.  Checks today's and yesterday's start so a window
+    that crosses midnight (23:30 for 90 min) is still recognised at 00:15.
+    `mktime` on a possibly-out-of-range day-of-month is well defined and
+    handles month wrap and DST for us.
+    """
+    hm = parse_hhmm(start_hhmm)
+    if hm is None or minutes <= 0:
+        return None
+    lt = time.localtime(t)
+    for day_offset in (0, -1):
+        st = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + day_offset, hm[0], hm[1], 0, 0, 0, -1))
+        en = st + minutes * 60
+        if st <= t < en:
+            return st, en
+    return None
+
+
+def window_next_start(start_hhmm: str, t: float) -> Optional[float]:
+    """Epoch seconds of the next occurrence's start strictly after `t`."""
+    hm = parse_hhmm(start_hhmm)
+    if hm is None:
+        return None
+    lt = time.localtime(t)
+    for day_offset in (0, 1):
+        st = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + day_offset, hm[0], hm[1], 0, 0, 0, -1))
+        if st > t:
+            return st
+    return None
+
+
+def _hold_row(conn: sqlite3.Connection) -> sqlite3.Row:
+    return conn.execute("SELECT * FROM fleet_hold WHERE id = 1").fetchone()
+
+
+def fleet_hold(conn: sqlite3.Connection) -> Optional[dict]:
+    """
+    The effective fleet-wide hold, or None.  Merges the ad-hoc hold and the
+    scheduled window: the fleet is held while either is active, until the
+    later of their deadlines, aborting in-flight files if either says so.
+
+    An ad-hoc hold whose deadline has passed is cleared here, lazily, the
+    first time anything asks after it lapsed -- the hub has no timers, and
+    every path that cares (check-in, claim, heartbeat, the dashboard poll)
+    goes through this function.
+    """
+    row = _hold_row(conn)
+    if row is None:
+        return None
+    t = now()
+    sources, reasons = [], []
+    until, set_at, set_by, abort = 0.0, 0.0, "", False
+
+    if row["held_until"] > t:
+        sources.append("manual")
+        reasons.append(row["reason"] or "no reason given")
+        until, set_at, set_by = row["held_until"], row["set_at"], row["set_by"]
+        abort = bool(row["abort_in_flight"])
+    elif row["held_until"]:
+        conn.execute("UPDATE fleet_hold SET held_until = 0 WHERE id = 1 AND held_until = ?",
+                     (row["held_until"],))
+        log_event(conn, f"Fleet hold expired without release: {row['reason'] or 'no reason given'}",
+                  level="warn")
+
+    if row["window_enabled"]:
+        b = window_bounds(row["window_start"], row["window_minutes"], t)
+        if b and b[1] > (row["window_skip_until"] or 0):
+            sources.append("window")
+            reasons.append(row["window_reason"] or "maintenance window")
+            if b[1] > until:
+                until = b[1]
+            if not set_at:
+                set_at, set_by = b[0], "schedule"
+            abort = abort or bool(row["window_abort"])
+
+    if not sources:
+        return None
+    return {
+        "reason":          " · ".join(reasons),
+        "until":           until,
+        "remaining":       round(until - t, 1),
+        "set_at":          set_at,
+        "set_by":          set_by,
+        "abort_in_flight": abort,
+        "sources":         sources,
+    }
+
+
+def set_fleet_hold(conn: sqlite3.Connection, reason: str, ttl_seconds: float, set_by: str = "",
+                   abort_in_flight: bool = False, extend_only: bool = False) -> Optional[dict]:
+    """
+    Start, extend or re-label the ad-hoc hold.  Idempotent: a second call
+    moves the deadline and updates the reason.  With `extend_only` the
+    deadline can only move later -- for callers that layer on top of a hold
+    someone else set (the SnapRAID hook must never cut a manual hold short).
+    """
+    t = now()
+    new_until = t + ttl_seconds
+    if extend_only:
+        row = _hold_row(conn)
+        if row["held_until"] >= new_until:
+            # Still honour a request to start aborting in-flight files.
+            if abort_in_flight and not row["abort_in_flight"]:
+                conn.execute("UPDATE fleet_hold SET abort_in_flight = 1 WHERE id = 1")
+            return fleet_hold(conn)
+    conn.execute(
+        """
+        UPDATE fleet_hold
+           SET reason = ?, held_until = ?, set_at = ?, set_by = ?, abort_in_flight = ?
+         WHERE id = 1
+        """,
+        (reason, new_until, t, set_by, 1 if abort_in_flight else 0),
+    )
+    return fleet_hold(conn)
+
+
+def clear_fleet_hold(conn: sqlite3.Connection) -> list[str]:
+    """
+    Release whatever is holding the fleet right now: the ad-hoc hold is
+    cleared, and if the scheduled window is open this occurrence is skipped
+    (the schedule itself stays; it fires again tomorrow).  Returns the
+    sources that were released.
+    """
+    t = now()
+    released = []
+    cur = conn.execute("UPDATE fleet_hold SET held_until = 0 WHERE id = 1 AND held_until > ?", (t,))
+    if cur.rowcount:
+        released.append("manual")
+    row = _hold_row(conn)
+    if row["window_enabled"]:
+        b = window_bounds(row["window_start"], row["window_minutes"], t)
+        if b and b[1] > (row["window_skip_until"] or 0):
+            conn.execute("UPDATE fleet_hold SET window_skip_until = ? WHERE id = 1", (b[1],))
+            released.append("window")
+    return released
+
+
+def hold_window(conn: sqlite3.Connection) -> dict:
+    """The schedule as configured, plus when it next opens -- for the dashboard."""
+    row = _hold_row(conn)
+    t = now()
+    b = window_bounds(row["window_start"], row["window_minutes"], t)
+    skipped = bool(b) and b[1] <= (row["window_skip_until"] or 0)
+    nxt = None
+    if row["window_enabled"]:
+        # If today's occurrence is open (or skipped), the next one is tomorrow's.
+        nxt = window_next_start(row["window_start"], b[1] if b else t)
+    return {
+        "enabled":         bool(row["window_enabled"]),
+        "start":           row["window_start"],
+        "minutes":         row["window_minutes"],
+        "reason":          row["window_reason"],
+        "abort_in_flight": bool(row["window_abort"]),
+        "open_now":        bool(b) and not skipped,
+        "skipped_today":   skipped,
+        "next_start":      nxt,
+        "hub_tz":          time.strftime("%Z", time.localtime(t)),
+        "hub_time":        time.strftime("%H:%M", time.localtime(t)),
+    }
+
+
+def set_hold_window(conn: sqlite3.Connection, *, enabled: bool, start: str, minutes: int,
+                    reason: str, abort_in_flight: bool) -> dict:
+    if parse_hhmm(start) is None:
+        raise ValueError("start must be HH:MM (24h)")
+    if not (1 <= int(minutes) <= 24 * 60):
+        raise ValueError("minutes must be between 1 and 1440")
+    conn.execute(
+        """
+        UPDATE fleet_hold
+           SET window_enabled = ?, window_start = ?, window_minutes = ?, window_reason = ?,
+               window_abort = ?, window_skip_until = 0
+         WHERE id = 1
+        """,
+        (1 if enabled else 0, start.strip(), int(minutes), reason.strip() or "maintenance window",
+         1 if abort_in_flight else 0),
+    )
+    return hold_window(conn)
+
 
 def release_expired_claims(conn: sqlite3.Connection) -> int:
     """

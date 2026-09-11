@@ -398,6 +398,10 @@ class Agent:
 
         # Set by the presence thread, read by the work loop.
         self._paused = False
+        # Fleet-wide hold from the hub (e.g. a SnapRAID sync in progress):
+        # the reason while one is active, "" otherwise.  Blocks new claims
+        # only; a file already in flight runs to completion.
+        self._fleet_hold = ""
         # Hub override: when true this agent ignores Jasna GPU state entirely
         # (keeps claiming and never yields), even if gpu_hold_url is set.
         self._ignore_jasna = False
@@ -410,11 +414,13 @@ class Agent:
 
     def status(self) -> dict:
         held = self._gpu_hold.enabled and self._gpu_hold.held and not self._ignore_jasna
+        holding = held or bool(self._fleet_hold)
         return {
             "host":        socket.gethostname(),
             "ignore_jasna": self._ignore_jasna,
-            "state":       "working" if self.current else ("holding" if held else "idle"),
+            "state":       "working" if self.current else ("holding" if holding else "idle"),
             "gpu_hold":    self._gpu_hold.reason if held else "",
+            "fleet_hold":  self._fleet_hold,
             "jasna":       self._gpu_hold.summary(),
             "gpu":         self._gpu.snapshot(),
             "current":     self.current,
@@ -511,6 +517,16 @@ class Agent:
 
     def _apply_directives(self, directives: dict) -> None:
         self._paused = bool(directives.get("paused"))
+        hold = directives.get("hold") or None
+        reason = (hold.get("reason") or "no reason given") if hold else ""
+        if bool(reason) != bool(self._fleet_hold):
+            if reason:
+                left = hold.get("remaining")
+                log(f"fleet hold: not claiming ({reason}"
+                    f"{'; lifts in ' + str(int(left // 60)) + ' min unless released' if left else ''})")
+            else:
+                log("fleet hold released: claiming resumes")
+        self._fleet_hold = reason
         was = self._ignore_jasna
         self._ignore_jasna = bool(directives.get("ignore_jasna"))
         if self._ignore_jasna != was and self._gpu_hold.enabled:
@@ -570,7 +586,7 @@ class Agent:
                 self._handle_scan(task)
                 did_work = True
 
-            elif (not self._paused and self._connected.is_set()
+            elif (not self._paused and not self._fleet_hold and self._connected.is_set()
                   and time.time() >= self._storage_down_until
                   and not self._gpu_holding()):
                 try:
@@ -747,6 +763,7 @@ class Agent:
         # One background thread keeps the hub's claim lease alive, refreshes
         # the on-disk lock's mtime, and watches for a Pause/Stop instruction.
         stop_beat = threading.Event()
+        abort_why = [""]      # the hub's stated reason, echoed into the requeue
 
         def beat():
             interval = float(self.cfg.get("heartbeat_seconds", 20))
@@ -757,7 +774,8 @@ class Agent:
                 except Exception:
                     continue                      # transient; keep working
                 if resp.get("abort"):
-                    log(f"abort requested: {resp.get('reason', '')}", "WARN")
+                    abort_why[0] = str(resp.get("reason") or "")
+                    log(f"abort requested: {abort_why[0]}", "WARN")
                     self._abort.set()
                     return
 
@@ -803,7 +821,8 @@ class Agent:
         if aborted:
             # No SRT was produced, so nothing is half-done on disk: put the
             # file back and let whoever picks it up next start it cleanly.
-            reason = "yielded to Jasna" if yielded.is_set() else "aborted by pause/stop"
+            reason = ("yielded to Jasna" if yielded.is_set()
+                      else abort_why[0] or "aborted by pause/stop")
             if yielded.is_set():
                 self.counts["yielded"] += 1
             log(f"aborted ({reason}) after {runner.format_duration(elapsed)}: {item['rel_path']}", "WARN")
