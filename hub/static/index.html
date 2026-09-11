@@ -440,6 +440,7 @@ function renderAgents() {
       '<h3>' + esc(a.agent_id) + '<span class="pill ' + cls + '">' + txt + '</span>' +
         '<span class="pill ' + jz.cls + '" title="' + esc(jz.tip) + '">' + jz.pill + '</span>' +
         '<span class="spacer"></span></h3>' +
+      (a.online ? gpuBits(s.gpu) : "") +
       '<div class="kv">' +
         '<span>WhisperJAV</span><b class="trunc">' + esc(s.whisperjav || "?") + '</b>' +
         '<span>Platform</span><b>' + esc(s.platform || "?") + '</b>' +
@@ -456,7 +457,6 @@ function renderAgents() {
           (s.progress ? '<div class="mono trunc" style="margin-top:6px;color:var(--dim)" title="' +
              esc(s.progress) + '">' + esc(s.progress) + '</div>' : "")
         : "") +
-      (a.online ? gpuBits(s.gpu) : "") +
       '<div class="btns">' +
         '<button class="' + (a.paused ? "ok" : "warn") + '" title="' + (a.paused
             ? "Let this agent resume claiming files."
