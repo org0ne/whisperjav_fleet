@@ -234,11 +234,20 @@ and reload the daemon (SIGHUP). Points worth knowing:
   a daemon you built from git, in its checkout:
 
   ```bash
+  sudo apt-get install -y autoconf automake pkg-config   # autogen.sh needs autoreconf
   git pull
   ./autogen.sh && ./configure --prefix=/usr/local   # the prefix you used before; /usr/local/etc/snapraidd.conf means /usr/local
-  make && sudo make install
+  make && sudo make install                          # keeps an existing snapraidd.conf
   sudo systemctl restart snapraidd && snapraidd --version
   ```
+
+  To prove the wiring without waiting for the night, schedule a `diff`
+  through the daemon's REST API (`POST /snapraid/v1/schedule` with
+  `{"tasks":[{"command":"diff"}]}`) after temporarily adding `diff` to
+  `HOLD_COMMANDS` and setting `HOLD_ABORT_IN_FLIGHT=0` in
+  `/usr/local/etc/snapraid-hook.conf`; the hub's Activity panel should show
+  "Fleet hold set: snapraid diff". Release the hold and delete the conf file
+  afterwards.
 
   The daemon's own notes say its 1.11+ heartbeat handling needs the
   SnapRAID engine at 14.6 or later, and it currently ships against 14.9;
