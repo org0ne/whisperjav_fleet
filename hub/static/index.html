@@ -12,6 +12,10 @@
     --radius:10px; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   }
   * { box-sizing:border-box; }
+  /* Author display rules (.holdbar{display:flex}, .pill{display:inline-...})
+     beat the browser's default [hidden]{display:none}; without this an
+     element hidden via the attribute still paints as an empty box. */
+  [hidden] { display:none !important; }
   body {
     margin:0; background:var(--bg); color:var(--text);
     font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
