@@ -298,5 +298,74 @@ class ClaimGate(unittest.TestCase):
             h.stop()
 
 
+def _fake_nvidia_smi(line: str) -> str:
+    """Write a fake nvidia-smi to a temp dir and return its path."""
+    d = tempfile.mkdtemp(prefix="fakesmi-")
+    p = os.path.join(d, "nvidia-smi")
+    with open(p, "w") as f:
+        f.write("#!/bin/sh\nprintf '%s\\n' " + repr(line) + "\n")
+    os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return p
+
+
+class GpuSamplerTest(unittest.TestCase):
+    def test_samples_and_snapshots(self):
+        smi = _fake_nvidia_smi("73, 12000, 24564, NVIDIA GeForce RTX 4090")
+        s = agent_mod.GpuSampler({"nvidia_smi_bin": smi, "gpu_sample_seconds": 1})
+        sd = threading.Event()
+        s.start(sd)
+        try:
+            self.assertTrue(wait_for(lambda: s.snapshot() is not None, 5), "should produce a sample")
+            snap = s.snapshot()
+            self.assertEqual(snap["util"], 73)
+            self.assertEqual(snap["mem_used"], 12000)
+            self.assertEqual(snap["mem_total"], 24564)
+            self.assertIn("RTX 4090", snap["name"])
+            self.assertTrue(snap["history"] and snap["history"][-1] == 73)
+        finally:
+            sd.set()
+
+    def test_history_is_bounded(self):
+        smi = _fake_nvidia_smi("50, 1, 24564, GPU")
+        s = agent_mod.GpuSampler({"nvidia_smi_bin": smi, "gpu_sample_seconds": 0.05})
+        s.HISTORY = 5
+        sd = threading.Event()
+        s.start(sd)
+        try:
+            self.assertTrue(wait_for(lambda: (s.snapshot() or {}).get("history") and
+                                     len(s.snapshot()["history"]) == 5, 5),
+                            "ring buffer must cap at HISTORY")
+            time.sleep(0.3)
+            self.assertLessEqual(len(s.snapshot()["history"]), 5, "must not grow past cap")
+        finally:
+            sd.set()
+
+    def test_missing_binary_reports_unavailable(self):
+        s = agent_mod.GpuSampler({"nvidia_smi_bin": "/no/such/nvidia-smi"})
+        sd = threading.Event()
+        s.start(sd)                 # thread must not spin without a binary
+        time.sleep(0.3)
+        self.assertIsNone(s.snapshot(), "no binary -> no graphic")
+        sd.set()
+
+    def test_disabled_reports_nothing(self):
+        smi = _fake_nvidia_smi("50, 1, 24564, GPU")
+        s = agent_mod.GpuSampler({"nvidia_smi_bin": smi, "gpu_sample": False})
+        sd = threading.Event()
+        s.start(sd)
+        time.sleep(0.3)
+        self.assertIsNone(s.snapshot(), "gpu_sample=false -> no graphic")
+        sd.set()
+
+    def test_bad_output_reports_unavailable(self):
+        smi = _fake_nvidia_smi("No devices were found")
+        s = agent_mod.GpuSampler({"nvidia_smi_bin": smi, "gpu_sample_seconds": 0.1})
+        sd = threading.Event()
+        s.start(sd)
+        time.sleep(0.4)
+        self.assertIsNone(s.snapshot(), "unparseable output must not crash or emit")
+        sd.set()
+
+
 if __name__ == "__main__":
     unittest.main()

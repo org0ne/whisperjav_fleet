@@ -93,6 +93,19 @@
   .bar i { display:block; height:100%; }
   .bar .d { background:var(--ok); } .bar .f { background:var(--err); }
   .bar .s { background:var(--dim); } .bar .r { background:var(--run); }
+  .bar .w { background:var(--warn); }
+  .gpu { margin-top:8px; }
+  .gpu-h { display:flex; justify-content:space-between; align-items:baseline;
+    font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim); }
+  .gpu-h b { color:var(--text); font-size:12px; font-variant-numeric:tabular-nums; }
+  .spark-wrap { position:relative; height:26px; margin:3px 0 0; }
+  .spark { display:block; width:100%; height:100%; }
+  .spark polyline { fill:none; stroke:var(--accent); stroke-width:1.5px; vector-effect:non-scaling-stroke; }
+  .spark polygon { fill:color-mix(in srgb, var(--accent) 16%, transparent); stroke:none; }
+  .spark-wrap .dot { position:absolute; right:0; width:5px; height:5px; margin:-3px -2px 0 0;
+    border-radius:50%; background:var(--accent); box-shadow:0 0 0 2px var(--panel2); }
+  .gpu .bar { margin:5px 0 4px; }
+  .gpu-m { font-size:11px; color:var(--dim); font-variant-numeric:tabular-nums; }
 
   table { width:100%; border-collapse:collapse; font-size:12px; }
   th, td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); }
@@ -370,6 +383,41 @@ function jasnaBits(a, j) {
   return { cls: "ok", pill: "jasna: aware", tip, row: esc(facts.join(" · ")) };
 }
 
+// Whole-GPU load mini graphic: a utilization sparkline plus a VRAM bar. The
+// agent sends `status.gpu` (util%, mem, and a short util history) only where
+// nvidia-smi exists, so this returns "" and shows nothing on GPU-less hosts.
+function gpuBits(g) {
+  if (!g || !g.mem_total) return "";
+  const clamp = v => Math.max(0, Math.min(100, v));
+  const h = (g.history || []).map(clamp);
+  const gb = m => (m / 1024).toFixed(1);
+  const memPct = Math.round(100 * g.mem_used / g.mem_total);
+  const memCls = memPct >= 90 ? "f" : (memPct >= 75 ? "w" : "r");
+  let spark = "";
+  if (h.length >= 2) {
+    const n = h.length;
+    const line = h.map((v, i) => i + "," + (100 - v)).join(" ");
+    spark =
+      '<div class="spark-wrap">' +
+        '<svg class="spark" viewBox="0 0 ' + (n - 1) + ' 100" preserveAspectRatio="none" aria-hidden="true">' +
+          '<polygon points="0,100 ' + line + ' ' + (n - 1) + ',100"/>' +
+          '<polyline points="' + line + '"/>' +
+        '</svg>' +
+        '<i class="dot" style="top:' + (100 - h[n - 1]) + '%"></i>' +
+      '</div>';
+  }
+  const tip = (g.name || "GPU") + " — " + g.util + "% util, " +
+    gb(g.mem_used) + " / " + gb(g.mem_total) + " GB VRAM" +
+    (g.sampled_ago != null ? " (sampled " + Math.round(g.sampled_ago) + "s ago)" : "");
+  return '<div class="gpu" title="' + esc(tip) + '">' +
+    '<div class="gpu-h"><span>GPU</span><b>' + g.util + '%</b></div>' +
+    spark +
+    '<div class="bar"><i class="' + memCls + '" style="width:' + memPct + '%"></i></div>' +
+    '<div class="gpu-m">' + gb(g.mem_used) + ' / ' + gb(g.mem_total) + ' GB' +
+      (g.name ? ' · ' + esc(g.name.replace(/^NVIDIA\s+/, "")) : "") + '</div>' +
+  '</div>';
+}
+
 function renderAgents() {
   const el = $("agents");
   if (!STATE.agents.length) {
@@ -408,6 +456,7 @@ function renderAgents() {
           (s.progress ? '<div class="mono trunc" style="margin-top:6px;color:var(--dim)" title="' +
              esc(s.progress) + '">' + esc(s.progress) + '</div>' : "")
         : "") +
+      (a.online ? gpuBits(s.gpu) : "") +
       '<div class="btns">' +
         '<button class="' + (a.paused ? "ok" : "warn") + '" title="' + (a.paused
             ? "Let this agent resume claiming files."

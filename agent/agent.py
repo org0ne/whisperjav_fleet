@@ -21,8 +21,10 @@ import base64
 import errno
 import json
 import os
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -52,6 +54,13 @@ DEFAULT_CONFIG = {
     "ollama_unload_on_abort": False,  # best-effort: drop the translate model from VRAM on abort
     "ollama_url": "http://127.0.0.1:11434",
     "storage_retry_seconds": 60,      # how long to stop claiming after the media mount vanishes
+
+    # -- GPU load graphic ---------------------------------------------------
+    # Sample whole-GPU load with nvidia-smi and send it on each check-in so the
+    # hub can draw a mini sparkline. Auto-off where nvidia-smi is absent.
+    "gpu_sample": True,               # set false to never sample / never send the graphic
+    "gpu_sample_seconds": 3,          # nvidia-smi cadence (~20ms per call)
+    "nvidia_smi_bin": "",             # blank -> auto-detect on PATH
 
     # -- GPU sharing with Jasna (stash-jasna-bridge) ------------------------
     # Jasna has priority on the GPU. The agent polls the bridge's health URL
@@ -274,6 +283,100 @@ class GpuHold:
             return (time.time() - self._last_held_at) < self.release
 
 
+class GpuSampler:
+    """
+    Sample whole-GPU load for the dashboard's mini graphic.
+
+    A background thread runs `nvidia-smi` at a slow cadence (default 3s) and
+    keeps a short ring buffer of utilization so the hub can draw a sparkline
+    without storing any history itself. The reading is *whole-GPU*: it sums
+    this agent, Jasna and anything else on the card -- it is a load gauge, not
+    per-process accounting.
+
+    Cost is deliberately tiny: one `nvidia-smi` call (~20ms) every few seconds,
+    a handful of integers piggy-backed on the check-in the agent already sends,
+    and zero GPU compute (a query reads driver counters). If `nvidia-smi` is
+    absent -- e.g. the GPU-less hub box, or a CPU worker -- the sampler reports
+    unavailable and the thread exits, so nothing is sent and the dashboard
+    simply omits the graphic.
+    """
+
+    HISTORY = 40   # ~2 minutes at a 3s cadence
+
+    def __init__(self, cfg: dict):
+        self.enabled = bool(cfg.get("gpu_sample", True))
+        self.interval = max(1.0, float(cfg.get("gpu_sample_seconds", 3)))
+        self.bin = (cfg.get("nvidia_smi_bin") or "").strip() or shutil.which("nvidia-smi") or ""
+        self.available = False
+        self._util = 0
+        self._mem_used = 0
+        self._mem_total = 0
+        self._name = ""
+        self._hist: list[int] = []
+        self._sampled_at = 0.0
+        self._lock = threading.Lock()
+        self._warned = False
+
+    def start(self, shutdown: threading.Event) -> None:
+        if not (self.enabled and self.bin):
+            return
+        threading.Thread(target=self._loop, args=(shutdown,), daemon=True).start()
+
+    def _query(self) -> Optional[tuple[int, int, int, str]]:
+        try:
+            out = subprocess.run(
+                [self.bin, "--query-gpu=utilization.gpu,memory.used,memory.total,name",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=8,
+            )
+            if out.returncode != 0:
+                return None
+            # First GPU only. "87, 11009, 24564, NVIDIA GeForce RTX 4090"
+            first = out.stdout.strip().splitlines()[0]
+            util, mem_used, mem_total, name = (p.strip() for p in first.split(",", 3))
+            return int(util), int(mem_used), int(mem_total), name
+        except Exception:
+            return None
+
+    def _loop(self, shutdown: threading.Event) -> None:
+        while not shutdown.is_set():
+            row = self._query()
+            with self._lock:
+                if row is None:
+                    self.available = False
+                    if not self._warned:
+                        log("gpu sample: nvidia-smi query failed; hiding the GPU graphic", "WARN")
+                        self._warned = True
+                else:
+                    util, mem_used, mem_total, name = row
+                    self.available = True
+                    self._warned = False
+                    self._util, self._mem_used = util, mem_used
+                    self._mem_total, self._name = mem_total, name
+                    self._sampled_at = time.time()
+                    self._hist.append(util)
+                    if len(self._hist) > self.HISTORY:
+                        del self._hist[:-self.HISTORY]
+            shutdown.wait(self.interval)
+
+    def snapshot(self) -> Optional[dict]:
+        """The GPU block for the check-in, or None when there is no GPU / no
+        sample yet, so the dashboard shows nothing rather than a dead gauge."""
+        if not (self.enabled and self.bin):
+            return None
+        with self._lock:
+            if not self.available or not self._hist:
+                return None
+            return {
+                "util":       self._util,
+                "mem_used":   self._mem_used,
+                "mem_total":  self._mem_total,
+                "name":       self._name,
+                "history":    list(self._hist),
+                "sampled_ago": round(time.time() - self._sampled_at, 1),
+            }
+
+
 class Agent:
     def __init__(self, config: dict):
         self.cfg = config
@@ -289,6 +392,7 @@ class Agent:
         self.counts = {"done": 0, "failed": 0, "skipped": 0, "yielded": 0}
         self._abort = threading.Event()
         self._gpu_hold = GpuHold(config)
+        self._gpu = GpuSampler(config)
         self._hold_logged = False
         self._progress = ""
 
@@ -312,6 +416,7 @@ class Agent:
             "state":       "working" if self.current else ("holding" if held else "idle"),
             "gpu_hold":    self._gpu_hold.reason if held else "",
             "jasna":       self._gpu_hold.summary(),
+            "gpu":         self._gpu.snapshot(),
             "current":     self.current,
             "progress":    self._progress[:300],
             "counts":      dict(self.counts),
@@ -448,6 +553,9 @@ class Agent:
 
         presence = threading.Thread(target=self._presence_loop, daemon=True)
         presence.start()
+        self._gpu.start(self.shutdown)
+        if self._gpu.enabled and not self._gpu.bin:
+            log("gpu sample: nvidia-smi not found; the GPU graphic is disabled here")
 
         # Give the first check-in a moment so --once has something to act on.
         self._connected.wait(timeout=15)
