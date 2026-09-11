@@ -56,8 +56,17 @@
      button rows line up across cards whose bodies differ in height (one is
      working with a file and a progress line, another is idle). The grid
      already stretches every card in a row to the same height. */
-  .card.agent { display:flex; flex-direction:column; }
-  .card.agent .btns { margin-top:auto; padding-top:10px; }
+  .card.agent, .card.job { display:flex; flex-direction:column; }
+  .card.agent .btns, .card.job .btns { margin-top:auto; padding-top:10px; }
+  /* Every card of a kind renders the same rows in the same order; a row that
+     does not apply is a .ghost: still laid out, just invisible, so the rows
+     (and the buttons) line up across cards. Job cards also reserve as many
+     in-progress table rows as the busiest job currently shows. */
+  .ghost { visibility:hidden; }
+  .active { margin-top:10px; border-collapse:collapse; width:100%; table-layout:fixed; }
+  .active td { padding:1px 0; font-size:12px; line-height:1.5; border:0; }
+  .active td.who { width:80px; white-space:nowrap; text-align:right; padding-right:8px; }
+  .active td.age { width:52px; white-space:nowrap; text-align:right; color:var(--dim); }
   .card h3 .spacer { flex:1; }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; font-size:12px; color:var(--dim); }
   .kv b { color:var(--text); font-weight:500; }
@@ -458,13 +467,20 @@ function jasnaBits(a, j) {
 // agent sends `status.gpu` (util%, mem, and a short util history) only where
 // nvidia-smi exists, so this returns "" and shows nothing on GPU-less hosts.
 function gpuBits(g) {
-  if (!g || !g.mem_total) return "";
+  if (!g || !g.mem_total) {
+    return '<div class="gpu ghost" aria-hidden="true">' +
+      '<div class="gpu-h"><span>GPU</span><b>&nbsp;</b></div>' +
+      '<div class="spark-wrap"></div>' +
+      '<div class="bar"></div>' +
+      '<div class="gpu-m">&nbsp;</div>' +
+    '</div>';
+  }
   const clamp = v => Math.max(0, Math.min(100, v));
   const h = (g.history || []).map(clamp);
   const gb = m => (m / 1024).toFixed(1);
   const memPct = Math.round(100 * g.mem_used / g.mem_total);
   const memCls = memPct >= 90 ? "f" : (memPct >= 75 ? "w" : "r");
-  let spark = "";
+  let spark = '<div class="spark-wrap"></div>';   // same height with or without history
   if (h.length >= 2) {
     const n = h.length;
     const line = h.map((v, i) => i + "," + (100 - v)).join(" ");
@@ -531,6 +547,13 @@ function addMinutes(hhmm, mins) {
   return String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0");
 }
 
+// One label/value row of an agent card's key-value grid. An empty value
+// renders as a ghost row (invisible, same height) so cards stay aligned.
+function row(label, html, attrs) {
+  if (!html) return '<span class="ghost">' + label + '</span><b class="ghost">&nbsp;</b>';
+  return '<span>' + label + '</span><b ' + (attrs || '') + '>' + html + '</b>';
+}
+
 function renderAgents() {
   const el = $("agents");
   if (!STATE.agents.length) {
@@ -553,25 +576,24 @@ function renderAgents() {
       '<h3>' + esc(a.agent_id) + '<span class="pill ' + cls + '">' + txt + '</span>' +
         '<span class="pill ' + jz.cls + '" title="' + esc(jz.tip) + '">' + jz.pill + '</span>' +
         '<span class="spacer"></span></h3>' +
-      (a.online ? gpuBits(s.gpu) : "") +
+      gpuBits(a.online ? s.gpu : null) +
       '<div class="kv">' +
-        '<span>WhisperJAV</span><b class="trunc">' + esc(s.whisperjav || "?") + '</b>' +
-        '<span>Platform</span><b>' + esc(s.platform || "?") + '</b>' +
-        '<span>Last seen</span><b>' + a.last_seen_ago.toFixed(0) + 's ago</b>' +
-        '<span>This run</span><b>' + (c.done||0) + ' done · ' + (c.failed||0) + ' failed · ' + (c.skipped||0) + ' skipped' +
-          ((c.yielded||0) ? ' · <span style="color:var(--warn)">' + c.yielded + ' yielded to Jasna</span>' : '') + '</b>' +
-        (jz.row ? '<span>Jasna</span><b class="trunc" title="' + esc(jz.tip) + '">' + jz.row + '</b>' : '') +
-        (s.fleet_hold ? '<span>Fleet hold</span><b class="trunc" style="color:var(--warn)" title="This agent has seen the fleet hold and is not claiming new files.">' +
-            esc(s.fleet_hold) + (cur.file ? (STATE.hold && STATE.hold.abort_in_flight ? ' · aborting current file' : ' · finishing current file') : '') + '</b>' : '') +
+        row('WhisperJAV', esc(s.whisperjav || "?"), 'class="trunc"') +
+        row('Platform', esc(s.platform || "?")) +
+        row('Last seen', a.last_seen_ago.toFixed(0) + 's ago') +
+        row('This run', (c.done||0) + ' done · ' + (c.failed||0) + ' failed · ' + (c.skipped||0) + ' skipped' +
+          ((c.yielded||0) ? ' · <span style="color:var(--warn)">' + c.yielded + ' yielded to Jasna</span>' : ''), 'class="trunc"') +
+        row('Jasna', jz.row, 'class="trunc" title="' + esc(jz.tip) + '"') +
+        row('Fleet hold', s.fleet_hold ? esc(s.fleet_hold) +
+              (cur.file ? (STATE.hold && STATE.hold.abort_in_flight ? ' · aborting current file' : ' · finishing current file') : '') : '',
+            'class="trunc" style="color:var(--warn)" title="This agent has seen the fleet hold and is not claiming new files."') +
       '</div>' +
-      (cur.file
-        ? '<div class="kv" style="margin-top:8px">' +
-            '<span>File</span><b class="trunc mono" title="' + esc(cur.file) + '">' + esc(cur.file) + '</b>' +
-            '<span>Job</span><b class="trunc">' + esc(cur.job_name || "") + '</b>' +
-          '</div>' +
-          (s.progress ? '<div class="mono trunc" style="margin-top:6px;color:var(--dim)" title="' +
-             esc(s.progress) + '">' + esc(s.progress) + '</div>' : "")
-        : "") +
+      '<div class="kv" style="margin-top:8px">' +
+        row('File', cur.file ? esc(cur.file) : '', 'class="trunc mono" title="' + esc(cur.file || "") + '"') +
+        row('Job', cur.file ? esc(cur.job_name || "") : '', 'class="trunc"') +
+      '</div>' +
+      '<div class="mono trunc' + (cur.file && s.progress ? '' : ' ghost') + '" style="margin-top:6px;color:var(--dim)" title="' +
+         esc(s.progress || "") + '">' + (cur.file && s.progress ? esc(s.progress) : '&nbsp;') + '</div>' +
       '<div class="btns">' +
         '<button class="' + (a.paused ? "ok" : "warn") + '" title="' + (a.paused
             ? "Let this agent resume claiming files."
@@ -601,11 +623,28 @@ function renderJobs() {
   }
   const cls = { running:"run", scanning:"run", done:"ok", paused:"warn",
                 stopped:"warn", failed:"err", draft:"off" };
+  // Same number of in-progress rows on every card (capped at 3; a busier job
+  // folds the rest into an "and N more" row), so the rows below line up.
+  const MAX_ROWS = 3;
+  const slots = Math.min(MAX_ROWS, Math.max(1, ...STATE.jobs.map(j => j.active.length)));
   el.innerHTML = STATE.jobs.map(j => {
     const c = j.counts, t = c.total || 1;
     const pct = n => (100 * n / t).toFixed(2) + "%";
     const running = (j.state === "running" || j.state === "scanning");
-    return '<div class="card">' +
+    const shown = j.active.length > slots ? j.active.slice(0, slots - 1) : j.active;
+    const activeRows = shown.map(a =>
+        '<tr><td class="mono trunc" title="' + esc(a.rel_path) + '">' + esc(a.rel_path) + '</td>' +
+        '<td class="who">' + esc(a.claimed_by || "") + '</td>' +
+        '<td class="age">' + dur(a.elapsed) + '</td></tr>')
+      .concat(j.active.length > slots
+        ? ['<tr><td colspan="3" style="color:var(--dim)" title="' +
+             esc(j.active.slice(slots - 1).map(a => a.rel_path + " (" + (a.claimed_by || "") + ")").join("\n")) + '">and ' +
+             (j.active.length - shown.length) + ' more in progress</td></tr>']
+        : [])
+      .concat(Array.from({ length: Math.max(0, slots - j.active.length) },
+        () => '<tr class="ghost"><td>&nbsp;</td><td class="who"></td><td class="age"></td></tr>'))
+      .join("");
+    return '<div class="card job">' +
       '<h3><span class="trunc" title="' + esc(j.name) + '">' + esc(j.name) + '</span>' +
         '<span class="pill ' + (cls[j.state] || "off") + '">' + j.state + '</span>' +
         '<span class="spacer"></span></h3>' +
@@ -619,20 +658,16 @@ function renderJobs() {
       '<div class="kv">' +
         '<span>Progress</span><b>' + c.finished + '/' + c.total + ' · ' + c.done + ' done · ' +
           c.failed + ' failed · ' + c.skipped + ' skipped</b>' +
-        '<span>Settings</span><b>.' + esc(j.lang_code) + '.srt' +
+        '<span>Settings</span><b class="trunc">.' + esc(j.lang_code) + '.srt' +
           (j.force ? " · force" : "") + (j.dry_run ? " · dry-run" : "") + '</b>' +
-        '<span>Agents</span><b>' + (j.agent_allowlist.length ? esc(j.agent_allowlist.join(", ")) : "any") + '</b>' +
+        '<span>Agents</span><b class="trunc" title="' + esc(j.agent_allowlist.join(", ")) + '">' +
+          (j.agent_allowlist.length ? esc(j.agent_allowlist.join(", ")) : "any") + '</b>' +
         '<span>Priority</span><b>' + j.priority + ' <span style="color:var(--dim)">' +
           esc(bandName(j.priority)) + '</span></b>' +
       '</div>' +
-      (j.active.length
-        ? '<table style="margin-top:10px"><tbody>' + j.active.map(a =>
-            '<tr><td class="mono trunc" style="max-width:230px" title="' + esc(a.rel_path) + '">' + esc(a.rel_path) + '</td>' +
-            '<td style="white-space:nowrap">' + esc(a.claimed_by || "") + '</td>' +
-            '<td style="white-space:nowrap;color:var(--dim)">' + dur(a.elapsed) + '</td></tr>').join("") +
-          '</tbody></table>'
-        : "") +
-      (j.error ? '<div class="mono" style="color:var(--err);margin-top:8px">' + esc(j.error) + '</div>' : "") +
+      '<table class="active"><tbody>' + activeRows + '</tbody></table>' +
+      '<div class="mono trunc' + (j.error ? '' : ' ghost') + '" style="color:var(--err);margin-top:8px" title="' +
+         esc(j.error || "") + '">' + (j.error ? esc(j.error) : '&nbsp;') + '</div>' +
       '<div class="btns">' +
         (running
           ? '<button class="warn" title="Abort every file in progress for this job and pause it; nothing partial is written." onclick="jobAct(' + j.id + ',\'pause\')">Pause</button>' +
