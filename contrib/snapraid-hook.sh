@@ -25,10 +25,20 @@
 # bracket the whole maintenance sequence.  This script therefore never
 # *releases* the hold; it only sets and extends it:
 #
-#   maintenance-start / task-begin   hold for HOLD_TTL_SECONDS from now
+#   maintenance-start / task-begin   hold for HOLD_TTL_SECONDS from now, then
+#                                    WAIT (up to HOLD_QUIESCE_SECONDS) until the
+#                                    hub reports no agent still working
 #   task-end / task-error            extend the hold to now + HOLD_TAIL_SECONDS,
 #                                    covering the probe / spin-down / report
 #                                    that follow the last hooked task
+#
+# The wait is what makes the hold arrive in time.  snapraidd runs this hook
+# synchronously and does not start the task until it returns, so blocking
+# here means sync cannot begin while a transcription is still writing to the
+# array.  A fleet abort takes one agent heartbeat (20 s by default) plus a
+# few seconds to kill the process group and remove the lock file; the wait
+# is bounded well under the daemon's 300 s hook timeout, and only happens
+# when HOLD_ABORT_IN_FLIGHT is on (with it off nothing would ever go quiet).
 #
 # Every call is "extend only": the deadline can move later, never earlier, so
 # this can never cut short a hold someone set by hand or the hub's own daily
@@ -55,6 +65,8 @@ HOLD_COMMANDS="sync scrub"  # space-separated; the hooked tasks that (re)arm the
 HOLD_TTL_SECONDS=7200       # 2 h from a task's start; the fail-open ceiling, not the expected duration
 HOLD_TAIL_SECONDS=900       # 15 min after a hooked task ends, for probe + spin-down + report
 HOLD_ABORT_IN_FLIGHT=1      # 1: abort (requeue) files being transcribed; 0: let them finish
+HOLD_QUIESCE_SECONDS=240    # after an aborting hold, wait at most this long for agents to go idle
+                            # (must stay under snapraidd's 300 s hook timeout)
 HOOK_CONF="/usr/local/etc/snapraid-hook.conf"   # optional: overrides the values above
 
 # shellcheck disable=SC1090
@@ -97,10 +109,30 @@ hold() {
          >/dev/null 2>&1
 }
 
+wait_quiet() {
+    # Block until the hub says no online agent has a file in progress, or
+    # HOLD_QUIESCE_SECONDS pass.  Returns 0 when quiet, 1 on timeout / no data.
+    [ "$abort" = true ] || return 0
+    start=$(date +%s); last=""
+    while :; do
+        # shellcheck disable=SC2086
+        resp=$(curl -fsS $auth --max-time 5 "$HUB_URL/api/hold" 2>/dev/null) || resp=""
+        case "$resp" in
+            *'"busy":[]'*)  return 0 ;;
+            *'"busy":'*)    last=$(printf '%s' "$resp" | sed -n 's/.*"busy":\[\([^]]*\)\].*/\1/p' | tr -d '"') ;;
+            "")             last="hub unreachable" ;;
+            *)  say "WARNING: hub does not report busy agents (update the hub); not waiting"; return 1 ;;
+        esac
+        [ $(( $(date +%s) - start )) -ge "$HOLD_QUIESCE_SECONDS" ] && { say "WARNING: still busy after ${HOLD_QUIESCE_SECONDS}s ($last); proceeding anyway"; return 1; }
+        sleep 3
+    done
+}
+
 case "$event" in
     maintenance-start)
         if hold "snapraid maintenance starting" "$HOLD_TTL_SECONDS"; then
             say "fleet held ahead of maintenance (ttl ${HOLD_TTL_SECONDS}s)"
+            t0=$(date +%s); wait_quiet && say "fleet quiet after $(( $(date +%s) - t0 ))s"
         else
             say "WARNING: could not reach the hub at $HUB_URL; maintenance proceeds with the fleet unheld"
         fi
@@ -109,6 +141,7 @@ case "$event" in
         reason="snapraid $cmd"; [ -n "$high" ] && reason="$reason ($high)"
         if hold "$reason" "$HOLD_TTL_SECONDS"; then
             say "fleet held for $cmd (ttl ${HOLD_TTL_SECONDS}s)"
+            t0=$(date +%s); wait_quiet && say "fleet quiet after $(( $(date +%s) - t0 ))s"
         else
             say "WARNING: could not reach the hub at $HUB_URL; $cmd proceeds with the fleet unheld"
         fi

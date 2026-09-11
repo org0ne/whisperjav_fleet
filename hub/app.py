@@ -792,8 +792,24 @@ class HoldWindowIn(BaseModel):
 
 @app.get("/api/hold")
 def get_hold(_a=Auth):
+    """
+    The effective hold, plus `busy`: the online agents still reporting a
+    file in progress.  A caller that has just set an aborting hold (the
+    SnapRAID hook) polls this until `busy` is empty before letting its own
+    task start, so the array is actually quiet -- not merely told to be --
+    by the time SnapRAID begins reading it.
+    """
+    now = db.now()
     with db.connect() as conn:
-        return {"hold": db.fleet_hold(conn)}
+        hold = db.fleet_hold(conn)
+        busy = []
+        for row in conn.execute("SELECT agent_id, status_json, last_seen FROM agents"):
+            if (now - row["last_seen"]) >= db.AGENT_OFFLINE_SECONDS:
+                continue
+            status = json.loads(row["status_json"] or "{}")
+            if status.get("state") == "working" or (status.get("current") or {}).get("file"):
+                busy.append(row["agent_id"])
+    return {"hold": hold, "busy": sorted(busy)}
 
 
 @app.post("/api/hold")
