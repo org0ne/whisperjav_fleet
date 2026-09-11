@@ -223,7 +223,16 @@ and reload the daemon (SIGHUP). Points worth knowing:
   host that reboots mid-sync or a hub that is unreachable at the end cannot
   park the fleet for longer than the later deadline.
 - **`HOLD_COMMANDS`** defaults to `sync scrub`. `diff`, `check` and `fix`
-  are also hooked; add them if you run those on a schedule.
+  are also hooked; add them if you run those on a schedule. **This filter
+  needs a daemon that names the command.** snapraidd only started passing
+  `SNAPRAID_COMMAND` / `SNAPRAID_HIGH_COMMAND` to the hook in master on
+  2026-06-08, and as of this writing no tagged release (up to v1.14)
+  contains that commit — a `1.11.x` build such as `1.11.3.g14ff505` passes
+  the event name only. The script detects the missing variable and then
+  arms the hold on *every* hooked task (sync, scrub, fix, check, diff), which
+  is the safe direction: an extra hold around a diff costs nothing. The
+  `notify_start` line likewise needs a master build from 2026-06-17 on; an
+  older daemon logs `unknown config option notify_start` and ignores it.
 - **Daemon rules.** The script must be root- or daemon-owned, not group- or
   world-writable, executable, without setuid, and a single hard link; the
   `install` line above satisfies them. The daemon scrubs the environment
