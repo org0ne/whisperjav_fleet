@@ -223,16 +223,26 @@ and reload the daemon (SIGHUP). Points worth knowing:
   host that reboots mid-sync or a hub that is unreachable at the end cannot
   park the fleet for longer than the later deadline.
 - **`HOLD_COMMANDS`** defaults to `sync scrub`. `diff`, `check` and `fix`
-  are also hooked; add them if you run those on a schedule. **This filter
-  needs a daemon that names the command.** snapraidd only started passing
-  `SNAPRAID_COMMAND` / `SNAPRAID_HIGH_COMMAND` to the hook in master on
-  2026-06-08, and as of this writing no tagged release (up to v1.14)
-  contains that commit — a `1.11.x` build such as `1.11.3.g14ff505` passes
-  the event name only. The script detects the missing variable and then
-  arms the hold on *every* hooked task (sync, scrub, fix, check, diff), which
-  is the safe direction: an extra hold around a diff costs nothing. The
-  `notify_start` line likewise needs a master build from 2026-06-17 on; an
-  older daemon logs `unknown config option notify_start` and ignores it.
+  are also hooked; add them if you run those on a schedule.
+- **Daemon version.** The script needs snapraid-daemon built from master
+  on or after 2026-06-17 (the 2.0 line): that is when the hook gained
+  `SNAPRAID_COMMAND` / `SNAPRAID_HIGH_COMMAND` and the daemon gained
+  `notify_start`. No tagged release up to v1.14 has either. An older daemon
+  passes only the event name; the script then logs
+  `snapraidd passed no SNAPRAID_COMMAND ... upgrade it` to syslog and holds
+  nothing (the hub's daily window still covers the fixed slot). To upgrade
+  a daemon you built from git, in its checkout:
+
+  ```bash
+  git pull
+  ./autogen.sh && ./configure --prefix=/usr/local   # the prefix you used before; /usr/local/etc/snapraidd.conf means /usr/local
+  make && sudo make install
+  sudo systemctl restart snapraidd && snapraidd --version
+  ```
+
+  The daemon's own notes say its 1.11+ heartbeat handling needs the
+  SnapRAID engine at 14.6 or later, and it currently ships against 14.9;
+  an engine at 14.4 is worth bringing up at the same time.
 - **Daemon rules.** The script must be root- or daemon-owned, not group- or
   world-writable, executable, without setuid, and a single hard link; the
   `install` line above satisfies them. The daemon scrubs the environment

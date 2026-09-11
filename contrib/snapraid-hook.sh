@@ -10,15 +10,20 @@
 #
 #     notify_start = /usr/local/bin/snapraid-hook.sh maintenance-start
 #
+# Requires snapraid-daemon built from master on or after 2026-06-17 (the
+# 2.0 line): that is when the hook gained SNAPRAID_COMMAND /
+# SNAPRAID_HIGH_COMMAND and the daemon gained notify_start.  An older daemon
+# passes only the event name; this script then logs that it is too old and
+# does nothing -- upgrade it rather than work around it (the hub's daily
+# window still covers the fixed slot in the meantime).
+#
 # snapraidd runs the hook with one argument -- task-begin, task-end or
 # task-error -- around every array-touching task (sync, scrub, fix, check,
-# diff).  Daemons built from 2026-06-08 on (release v1.12+) also pass the
-# details in SNAPRAID_COMMAND / SNAPRAID_HIGH_COMMAND; older ones (1.11.x)
-# pass nothing but the event, so with those every hooked task arms the hold
-# and HOLD_COMMANDS is moot.  The hook does NOT fire around spin-up (up),
-# spin-down (down), probe or report, so a hook alone cannot bracket the whole
-# maintenance sequence.  This script therefore never *releases* the hold; it
-# only sets and extends it:
+# diff), with the task in SNAPRAID_COMMAND and the sequence it belongs to
+# (e.g. maintenance) in SNAPRAID_HIGH_COMMAND.  It does NOT fire around
+# spin-up (up), spin-down (down), probe or report, so a hook alone cannot
+# bracket the whole maintenance sequence.  This script therefore never
+# *releases* the hold; it only sets and extends it:
 #
 #   maintenance-start / task-begin   hold for HOLD_TTL_SECONDS from now
 #   task-end / task-error            extend the hold to now + HOLD_TAIL_SECONDS,
@@ -47,7 +52,6 @@ HUB_URL="http://192.168.11.50:8787"
 HUB_USER=""                 # only if the hub sets HUB_USER / HUB_PASS
 HUB_PASS=""
 HOLD_COMMANDS="sync scrub"  # space-separated; the hooked tasks that (re)arm the hold
-                            # (only honoured when the daemon passes SNAPRAID_COMMAND)
 HOLD_TTL_SECONDS=7200       # 2 h from a task's start; the fail-open ceiling, not the expected duration
 HOLD_TAIL_SECONDS=900       # 15 min after a hooked task ends, for probe + spin-down + report
 HOLD_ABORT_IN_FLIGHT=1      # 1: abort (requeue) files being transcribed; 0: let them finish
@@ -67,17 +71,17 @@ say() { logger -t "$me" "$*" 2>/dev/null || echo "$me: $*" >&2; }
 # a broken pipe.  (Harmless for hook invocations, which get no stdin.)
 [ "$event" = "maintenance-start" ] && cat >/dev/null 2>&1
 
-# Filter by command only when the daemon tells us which one it is.  A 1.11.x
-# daemon sets no SNAPRAID_* variables at all; then every hooked task counts,
-# which is the safe direction (an extra hold on a diff costs nothing).
-if [ "$event" != "maintenance-start" ] && [ -n "$cmd" ]; then
+if [ "$event" != "maintenance-start" ]; then
+    if [ -z "$cmd" ]; then
+        say "ERROR: snapraidd passed no SNAPRAID_COMMAND; this daemon predates 2026-06-17 -- upgrade it. Not holding the fleet."
+        exit 0
+    fi
     wanted=0
     for c in $HOLD_COMMANDS; do
         [ "$c" = "$cmd" ] && wanted=1
     done
     [ "$wanted" -eq 1 ] || exit 0      # e.g. the diff before sync
 fi
-what="${cmd:-task}"                    # for messages when the daemon named no command
 
 auth=""
 [ -n "$HUB_USER" ] && auth="-u $HUB_USER:$HUB_PASS"
@@ -102,18 +106,18 @@ case "$event" in
         fi
         ;;
     task-begin)
-        reason="snapraid $what"; [ -n "$high" ] && reason="$reason ($high)"
+        reason="snapraid $cmd"; [ -n "$high" ] && reason="$reason ($high)"
         if hold "$reason" "$HOLD_TTL_SECONDS"; then
-            say "fleet held for $what (ttl ${HOLD_TTL_SECONDS}s)"
+            say "fleet held for $cmd (ttl ${HOLD_TTL_SECONDS}s)"
         else
-            say "WARNING: could not reach the hub at $HUB_URL; $what proceeds with the fleet unheld"
+            say "WARNING: could not reach the hub at $HUB_URL; $cmd proceeds with the fleet unheld"
         fi
         ;;
     task-end|task-error)
-        if hold "snapraid $what finished; covering spin-down" "$HOLD_TAIL_SECONDS"; then
-            say "fleet hold extended ${HOLD_TAIL_SECONDS}s past $what ($event) for spin-down"
+        if hold "snapraid $cmd finished; covering spin-down" "$HOLD_TAIL_SECONDS"; then
+            say "fleet hold extended ${HOLD_TAIL_SECONDS}s past $cmd ($event) for spin-down"
         else
-            say "WARNING: could not reach the hub at $HUB_URL after $what; the hold lapses on its own"
+            say "WARNING: could not reach the hub at $HUB_URL after $cmd; the hold lapses on its own"
         fi
         ;;
     *)
