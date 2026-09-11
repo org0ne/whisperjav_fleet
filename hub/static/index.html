@@ -583,6 +583,14 @@ function renderAgents() {
         row('Last seen', a.last_seen_ago.toFixed(0) + 's ago') +
         row('This run', (c.done||0) + ' done · ' + (c.failed||0) + ' failed · ' + (c.skipped||0) + ' skipped' +
           ((c.yielded||0) ? ' · <span style="color:var(--warn)">' + c.yielded + ' yielded to Jasna</span>' : ''), 'class="trunc"') +
+        row('Avg time', a.timing
+              ? dur(a.timing.avg_duration) +
+                (a.timing.recent_n >= 3 && a.timing.recent_n < a.timing.done_total
+                  ? ' <span style="color:var(--dim)">(last ' + a.timing.recent_n + ': ' + dur(a.timing.avg_recent) + ')</span>' : '') +
+                ' <span style="color:var(--dim)">· ' + a.timing.done_total + ' done</span>'
+              : '',
+            'class="trunc" title="Mean time from start to finish per file, over every file this agent has completed that is still on the hub' +
+              (a.timing && a.timing.recent_n ? '; in brackets, the mean of its most recent ' + a.timing.recent_n : '') + '."') +
         row('Jasna', jz.row, 'class="trunc" title="' + esc(jz.tip) + '"') +
         row('Fleet hold', s.fleet_hold ? esc(s.fleet_hold) +
               (cur.file ? (STATE.hold && STATE.hold.abort_in_flight ? ' · aborting current file' : ' · finishing current file') : '') : '',

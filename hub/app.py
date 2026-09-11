@@ -518,6 +518,33 @@ def get_state(_a=Auth):
         db.release_expired_claims(conn)
         hold = db.fleet_hold(conn)
 
+        # Per-agent transcription time, start to finish, over every file it
+        # completed that is still in the database (deleting a job drops its
+        # items).  `duration` is measured by the agent itself around the
+        # whisperjav run.  Both the all-time mean and the mean of the last
+        # ten, since file lengths and settings drift over time.
+        timing: dict[str, dict] = {}
+        for r in conn.execute(
+            """
+            SELECT claimed_by, AVG(duration) AS avg, COUNT(*) AS n
+              FROM work_items
+             WHERE state = 'done' AND duration > 0 AND claimed_by IS NOT NULL
+             GROUP BY claimed_by
+            """
+        ):
+            timing[r["claimed_by"]] = {"avg_duration": round(r["avg"]), "done_total": r["n"]}
+        for agent_id, t in timing.items():
+            recent = [r["duration"] for r in conn.execute(
+                """
+                SELECT duration FROM work_items
+                 WHERE state = 'done' AND duration > 0 AND claimed_by = ?
+                 ORDER BY finished_at DESC LIMIT 10
+                """,
+                (agent_id,),
+            )]
+            t["avg_recent"] = round(sum(recent) / len(recent)) if recent else None
+            t["recent_n"] = len(recent)
+
         agents = []
         for row in conn.execute("SELECT * FROM agents ORDER BY agent_id"):
             status = json.loads(row["status_json"] or "{}")
@@ -528,6 +555,7 @@ def get_state(_a=Auth):
                 "ignore_jasna": bool(row["ignore_jasna"]),
                 "last_seen_ago": round(now - row["last_seen"], 1),
                 "status":   status,
+                "timing":   timing.get(row["agent_id"]),
             })
 
         jobs = []
