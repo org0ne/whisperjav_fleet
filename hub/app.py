@@ -240,9 +240,10 @@ def agent_checkin(agent_id: str, status: dict, _a=Auth):
         )
 
         arow = conn.execute(
-            "SELECT paused FROM agents WHERE agent_id = ?", (agent_id,)
+            "SELECT paused, ignore_jasna FROM agents WHERE agent_id = ?", (agent_id,)
         ).fetchone()
         paused = bool(arow["paused"]) if arow else False
+        ignore_jasna = bool(arow["ignore_jasna"]) if arow else False
 
         # --- Pending folder-browse request for this agent -------------------
         browse = conn.execute(
@@ -299,7 +300,7 @@ def agent_checkin(agent_id: str, status: dict, _a=Auth):
                     "video_extensions": json.loads(job["video_extensions"] or "[]"),
                 }
 
-    return {"paused": paused, "browse": browse_task, "scan": scan_task}
+    return {"paused": paused, "ignore_jasna": ignore_jasna, "browse": browse_task, "scan": scan_task}
 
 
 @app.post("/api/agent/{agent_id}/claim")
@@ -503,6 +504,7 @@ def get_state(_a=Auth):
                 "agent_id": row["agent_id"],
                 "online":   (now - row["last_seen"]) < db.AGENT_OFFLINE_SECONDS,
                 "paused":   bool(row["paused"]),
+                "ignore_jasna": bool(row["ignore_jasna"]),
                 "last_seen_ago": round(now - row["last_seen"], 1),
                 "status":   status,
             })
@@ -758,6 +760,19 @@ def pause_agent(agent_id: str, body: dict, _a=Auth):
                 (agent_id,),
             )
         db.log_event(conn, f"Agent {'paused' if paused else 'resumed'}", agent_id=agent_id)
+    return {"ok": True}
+
+
+@app.post("/api/agents/{agent_id}/ignore_jasna")
+def set_agent_ignore_jasna(agent_id: str, body: dict, _a=Auth):
+    """Per-agent override: when on, this agent ignores Jasna GPU state and
+    keeps claiming/working even while Jasna is active. Off (default) yields."""
+    ignore = bool((body or {}).get("ignore", True))
+    with db.connect() as conn:
+        conn.execute("UPDATE agents SET ignore_jasna = ? WHERE agent_id = ?",
+                     (1 if ignore else 0, agent_id))
+        db.log_event(conn, f"Agent set to {'ignore' if ignore else 'respect'} Jasna GPU state",
+                     agent_id=agent_id)
     return {"ok": True}
 
 

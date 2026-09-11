@@ -363,6 +363,7 @@ function jasnaBits(a, j) {
   if (b.version)   facts.push("bridge " + b.version);
   const probed = (j.probed_ago == null) ? "" : " · probed " + Math.round(j.probed_ago) + "s ago";
   const tip = "Jasna-aware (" + (j.mode || "yield") + " mode) via " + (j.url || "") + probed;
+  if (a.ignore_jasna) return { cls: "off",  pill: "jasna: ignored", tip: "This agent is set to ignore Jasna GPU state (hub override); it will not yield.", row: "ignoring Jasna (override)" };
   if (!a.online)      return { cls: "off",  pill: "jasna: aware", tip, row: esc(facts.join(" · ")) };
   if (!j.reachable)   return { cls: "err",  pill: "jasna: bridge down", tip: tip + " - the bridge did not answer; agent works normally", row: "bridge unreachable" };
   if (j.held)         return { cls: "warn", pill: "holding for jasna", tip: tip + " - " + (j.reason || ""), row: esc((j.reason || "held") + " · " + facts.join(" · ")) };
@@ -384,6 +385,7 @@ function renderAgents() {
     else if (a.online && cur.file) { cls = "run";  txt = "working"; }
     else if (a.online && s.state === "holding") { cls = "warn"; txt = "holding"; }
     else if (a.online)             { cls = "ok";   txt = "idle"; }
+    const ignoring = a.ignore_jasna && (a.status && a.status.jasna && a.status.jasna.aware);
     const c = s.counts || {};
     const jz = jasnaBits(a, s.jasna || {});
     return '<div class="card">' +
@@ -412,6 +414,13 @@ function renderAgents() {
             : "Stop this agent from claiming new files; the one in progress finishes normally.") +
           '" onclick="pauseAgent(\'' + esc(a.agent_id) + '\',' + (a.paused ? "false" : "true") + ')">' +
           (a.paused ? "Resume" : "Pause") + '</button>' +
+        ((a.status && a.status.jasna && a.status.jasna.aware)
+          ? '<button class="' + (ignoring ? "warn" : "") + '" title="' + (ignoring
+              ? "This agent is ignoring Jasna: it keeps using the GPU even while Jasna is active. Click to make it yield to Jasna again."
+              : "Let this agent keep using the GPU even while Jasna is active, instead of yielding.") +
+            '" onclick="ignoreJasna(\'' + esc(a.agent_id) + '\',' + (a.ignore_jasna ? "false" : "true") + ')">' +
+            (a.ignore_jasna ? "Respect Jasna" : "Ignore Jasna") + '</button>'
+          : "") +
         (a.online && cur.file
           ? '<button class="danger" title="Abort the file this agent is working on right now and pause it, freeing its GPU immediately." onclick="stopAgent(\'' + esc(a.agent_id) + '\')">Stop now</button>'
           : "") +
@@ -515,6 +524,7 @@ const wrap = fn => async (...a) => {
 const jobAct      = wrap((id, action) => api("/api/jobs/" + id + "/action", "POST", { action }));
 const delJob      = wrap(id => confirm("Delete this job and its queue?") ? api("/api/jobs/" + id, "DELETE") : null);
 const pauseAgent  = wrap((id, p) => api("/api/agents/" + id + "/pause", "POST", { paused: p }));
+const ignoreJasna = wrap((id, ig) => api("/api/agents/" + id + "/ignore_jasna", "POST", { ignore: ig }));
 const forgetAgent = wrap(id => api("/api/agents/" + id, "DELETE"));
 const stopAgent   = wrap(id => confirm("Stop " + id + " now? Its current file will be aborted " +
   "and requeued, and the agent will pause until you resume it.") ? api("/api/agents/" + id + "/stop", "POST") : null);

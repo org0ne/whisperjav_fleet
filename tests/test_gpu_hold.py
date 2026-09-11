@@ -62,6 +62,7 @@ class FakeHub:
     """Enough of the hub API for one item: checkin/claim/heartbeat/requeue/complete."""
     def __init__(self, item):
         self.item = item
+        self.ignore_jasna = False
         self.claims = 0
         self.heartbeats = 0
         self.requeues: list[str] = []
@@ -83,7 +84,7 @@ class FakeHub:
                 path = self.path
                 with hub.lock:
                     if path.endswith("/checkin"):
-                        return self._json({"paused": False, "browse": None, "scan": None})
+                        return self._json({"paused": False, "ignore_jasna": hub.ignore_jasna, "browse": None, "scan": None})
                     if path.endswith("/claim"):
                         hub.claims += 1
                         item, hub.item = hub.item, None   # hand it out once
@@ -257,6 +258,33 @@ class ClaimGate(unittest.TestCase):
             self.assertEqual(h.hub.claims, 0, "must not claim while Jasna is resident")
             self.assertEqual(h.agent.status()["state"], "holding")
             self.assertIn("resident", h.agent.status()["gpu_hold"])
+        finally:
+            h.stop()
+
+    def test_ignore_override_claims_while_jasna_held(self):
+        h = Harness(mode="yield", release=0)
+        h.health.running = True          # Jasna resident -> would normally hold
+        h.start()
+        try:
+            time.sleep(3)
+            self.assertEqual(h.hub.claims, 0, "held before the override")
+            h.hub.ignore_jasna = True     # hub flips the per-agent override
+            self.assertTrue(wait_for(lambda: h.hub.claims >= 1, 10),
+                            "with ignore on, the agent claims despite Jasna holding")
+            self.assertTrue(wait_for(lambda: os.path.exists(h.pidfile), 10))
+        finally:
+            h.stop()
+
+    def test_ignore_override_prevents_mid_file_yield(self):
+        h = Harness(mode="yield", release=0)
+        h.hub.ignore_jasna = True
+        h.start()
+        try:
+            self.assertTrue(wait_for(lambda: os.path.exists(h.pidfile), 15), "should start a file")
+            h.health.active = True        # Jasna starts; normally this yields
+            time.sleep(5)
+            self.assertEqual(h.hub.requeues, [], "ignore override must not yield the in-flight file")
+            self.assertTrue(pid_alive(h.pidfile), "whisperjav keeps running")
         finally:
             h.stop()
 

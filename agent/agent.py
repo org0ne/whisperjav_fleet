@@ -294,6 +294,9 @@ class Agent:
 
         # Set by the presence thread, read by the work loop.
         self._paused = False
+        # Hub override: when true this agent ignores Jasna GPU state entirely
+        # (keeps claiming and never yields), even if gpu_hold_url is set.
+        self._ignore_jasna = False
         self._pending_scan: Optional[dict] = None
         self._connected = threading.Event()
         # Work loop only: no claims until this time when the mount is gone.
@@ -302,9 +305,10 @@ class Agent:
     # -- status -------------------------------------------------------------
 
     def status(self) -> dict:
-        held = self._gpu_hold.enabled and self._gpu_hold.held
+        held = self._gpu_hold.enabled and self._gpu_hold.held and not self._ignore_jasna
         return {
             "host":        socket.gethostname(),
+            "ignore_jasna": self._ignore_jasna,
             "state":       "working" if self.current else ("holding" if held else "idle"),
             "gpu_hold":    self._gpu_hold.reason if held else "",
             "jasna":       self._gpu_hold.summary(),
@@ -402,6 +406,10 @@ class Agent:
 
     def _apply_directives(self, directives: dict) -> None:
         self._paused = bool(directives.get("paused"))
+        was = self._ignore_jasna
+        self._ignore_jasna = bool(directives.get("ignore_jasna"))
+        if self._ignore_jasna != was and self._gpu_hold.enabled:
+            log(f"Jasna GPU state: {'IGNORING (hub override)' if self._ignore_jasna else 'respecting'}")
 
         if directives.get("browse") and self.cfg.get("allow_browse", True):
             self._handle_browse(directives["browse"])
@@ -510,7 +518,10 @@ class Agent:
                 pass
 
     def _gpu_holding(self) -> bool:
-        """Claim gate: True while Jasna has the GPU (or just released it)."""
+        """Claim gate: True while Jasna has the GPU (or just released it).
+        The hub's per-agent 'ignore Jasna' override disables it."""
+        if self._ignore_jasna:
+            return False
         blocking = self._gpu_hold.blocking()
         if blocking and not self._hold_logged:
             why = self._gpu_hold.reason or "release window"
@@ -653,6 +664,8 @@ class Agent:
         if self._gpu_hold.enabled and self._gpu_hold.mode == "yield":
             def gpu_watch():
                 while not stop_beat.wait(self._gpu_hold.poll):
+                    if self._ignore_jasna:
+                        continue
                     held, why = self._gpu_hold.probe()
                     if held:
                         log(f"yielding GPU to Jasna ({why}); aborting {item['rel_path']}", "WARN")

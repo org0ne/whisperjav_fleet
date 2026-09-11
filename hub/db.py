@@ -107,6 +107,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             last_seen        REAL NOT NULL DEFAULT 0,
             paused           INTEGER NOT NULL DEFAULT 0,
             abort_requested  INTEGER NOT NULL DEFAULT 0,
+            ignore_jasna     INTEGER NOT NULL DEFAULT 0,
             first_seen       REAL NOT NULL DEFAULT 0
         );
 
@@ -214,6 +215,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     agent_cols = {row["name"] for row in conn.execute("PRAGMA table_info(agents)")}
     if "abort_requested" not in agent_cols:
         conn.execute("ALTER TABLE agents ADD COLUMN abort_requested INTEGER NOT NULL DEFAULT 0")
+    if "ignore_jasna" not in agent_cols:
+        conn.execute("ALTER TABLE agents ADD COLUMN ignore_jasna INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------------------------------------------------------------------------
