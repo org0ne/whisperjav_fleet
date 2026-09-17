@@ -501,6 +501,7 @@ def release_expired_claims(conn: sqlite3.Connection) -> int:
                claimed_by = NULL,
                claim_expires = 0,
                progress = '',
+               started_at = NULL,
                last_error = 'claim lease expired -- re-queued',
                updated_at = ?
          WHERE state IN ('claimed', 'running')
@@ -579,7 +580,7 @@ def claim_next(agent_id: str, *, lease_seconds: int = CLAIM_LEASE_SECONDS) -> Op
                            claimed_by = ?,
                            claim_expires = ?,
                            attempts = attempts + 1,
-                           started_at = COALESCE(started_at, ?),
+                           started_at = ?,
                            progress = '',
                            updated_at = ?
                      WHERE id = ?
@@ -689,6 +690,7 @@ def requeue_item(conn: sqlite3.Connection, item_id: int, agent_id: str, reason: 
                claimed_by = NULL,
                claim_expires = 0,
                progress = '',
+               started_at = NULL,
                last_error = ?,
                updated_at = ?
          WHERE id = ?
@@ -714,6 +716,68 @@ def job_counts(conn: sqlite3.Connection, job_id: int) -> dict:
     counts["total"] = sum(counts[s] for s in ITEM_STATES)
     counts["finished"] = counts["done"] + counts["failed"] + counts["skipped"]
     return counts
+
+
+def agent_job_runtimes(conn: sqlite3.Connection, now_ts: float) -> dict[str, list[dict]]:
+    """
+    Per agent, one entry per job it has worked on that is still on the hub:
+    how many of that job's files it finished, its mean and total time on
+    them (`duration`, measured by the agent around each whisperjav run), and
+    the file it is running for that job right now with its elapsed time
+    (`started_at` is per attempt, so a resumed file does not carry the time
+    from before it was paused).  Ordered with the job in progress first,
+    then by most recently finished.
+    """
+    per: dict[str, dict[int, dict]] = {}
+
+    def entry(agent_id: str, job_id: int, name: str, state: str) -> dict:
+        e = per.setdefault(agent_id, {}).get(job_id)
+        if e is None:
+            e = per[agent_id][job_id] = {
+                "job_id": job_id, "job_name": name, "job_state": state,
+                "done": 0, "avg_duration": None, "total_duration": 0,
+                "last_finished_ago": None, "current": None,
+            }
+        return e
+
+    for r in conn.execute(
+        """
+        SELECT w.claimed_by AS agent_id, w.job_id, j.name, j.state,
+               COUNT(*) AS n, SUM(w.duration) AS total, AVG(w.duration) AS avg,
+               MAX(w.finished_at) AS last_finished
+          FROM work_items w JOIN jobs j ON j.id = w.job_id
+         WHERE w.state = 'done' AND w.duration > 0 AND w.claimed_by IS NOT NULL
+         GROUP BY w.claimed_by, w.job_id
+        """
+    ):
+        e = entry(r["agent_id"], r["job_id"], r["name"], r["state"])
+        e["done"] = r["n"]
+        e["total_duration"] = round(r["total"])
+        e["avg_duration"] = round(r["avg"])
+        e["last_finished_ago"] = round(now_ts - r["last_finished"], 1) if r["last_finished"] else None
+
+    for r in conn.execute(
+        """
+        SELECT w.claimed_by AS agent_id, w.job_id, j.name, j.state, w.rel_path, w.started_at
+          FROM work_items w JOIN jobs j ON j.id = w.job_id
+         WHERE w.state IN ('claimed', 'running') AND w.claimed_by IS NOT NULL
+         ORDER BY w.started_at
+        """
+    ):
+        e = entry(r["agent_id"], r["job_id"], r["name"], r["state"])
+        if e["current"] is None:  # one file at a time per agent; keep the oldest if the DB disagrees
+            e["current"] = {"rel_path": r["rel_path"],
+                            "elapsed": round(now_ts - r["started_at"], 1) if r["started_at"] else 0}
+
+    out: dict[str, list[dict]] = {}
+    for agent_id, jobs in per.items():
+        out[agent_id] = sorted(
+            jobs.values(),
+            key=lambda e: (0 if e["current"] else 1,
+                           e["last_finished_ago"] if e["last_finished_ago"] is not None else float("inf"),
+                           -e["job_id"]),
+        )
+    return out
 
 
 def maybe_finish_job(conn: sqlite3.Connection, job_id: int) -> None:

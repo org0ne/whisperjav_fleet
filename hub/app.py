@@ -544,6 +544,9 @@ def get_state(_a=Auth):
             )]
             t["avg_recent"] = round(sum(recent) / len(recent)) if recent else None
             t["recent_n"] = len(recent)
+        # The same, broken down per job, with the file in progress and its
+        # elapsed time: the dashboard's per-agent "runtime by job" table.
+        job_runtimes = db.agent_job_runtimes(conn, now)
 
         agents = []
         for row in conn.execute("SELECT * FROM agents ORDER BY agent_id"):
@@ -556,6 +559,7 @@ def get_state(_a=Auth):
                 "last_seen_ago": round(now - row["last_seen"], 1),
                 "status":   status,
                 "timing":   timing.get(row["agent_id"]),
+                "jobs":     job_runtimes.get(row["agent_id"], []),
             })
 
         jobs = []
