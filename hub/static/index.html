@@ -72,9 +72,6 @@
   .active td { padding:1px 0; font-size:12px; line-height:1.5; border:0; }
   .active td.who { width:80px; white-space:nowrap; text-align:right; padding-right:8px; }
   .active td.age { width:52px; white-space:nowrap; text-align:right; color:var(--dim); }
-  .active td.stat { width:84px; white-space:nowrap; text-align:right; padding-right:8px; color:var(--dim); }
-  .active td.rt { width:66px; white-space:nowrap; text-align:right; color:var(--dim); }
-  .active td.rt.live { color:var(--run); }
   .card h3 .spacer { flex:1; }
   .card h3 > .trunc { min-width:0; }           /* a long name shrinks and truncates rather than widening the card */
   .kv { display:grid; grid-template-columns:auto minmax(0,1fr); gap:2px 12px; font-size:12px; color:var(--dim); }
@@ -582,12 +579,7 @@ function renderAgents() {
     avg:   STATE.agents.some(a => a.timing),
     file:  STATE.agents.some(a => ((a.status || {}).current || {}).file),
     prog:  STATE.agents.some(a => ((a.status || {}).current || {}).file && (a.status || {}).progress),
-    jobs:  STATE.agents.some(a => (a.jobs || []).length),
   };
-  // Runtime by job: the same number of rows on every card (capped at 3, the
-  // rest folded into an "and N more" row), so the buttons below line up.
-  const JOB_ROWS = 3;
-  const jobSlots = Math.min(JOB_ROWS, Math.max(1, ...STATE.agents.map(a => (a.jobs || []).length)));
   el.innerHTML = STATE.agents.map(a => {
     const s = a.status || {};
     const cur = s.current || {};
@@ -633,7 +625,6 @@ function renderAgents() {
         ? '<div class="mono trunc' + (cur.file && s.progress ? '' : ' ghost') + '" style="margin-top:6px;color:var(--dim)" title="' +
             esc(s.progress || "") + '">' + (cur.file && s.progress ? esc(s.progress) : '&nbsp;') + '</div>'
         : "") +
-      (any.jobs ? agentJobsTable(a, jobSlots) : "") +
       '<div class="btns">' +
         '<button class="' + (a.paused ? "ok" : "warn") + '" title="' + (a.paused
             ? "Let this agent resume claiming files."
@@ -653,36 +644,6 @@ function renderAgents() {
         (!a.online ? '<button class="danger" title="Remove this offline agent from the dashboard; it reappears if it checks in again." onclick="forgetAgent(\'' + esc(a.agent_id) + '\')">Forget</button>' : "") +
       '</div></div>';
   }).join("");
-}
-
-// Per-agent "runtime by job": one row per job this agent has worked on that
-// is still on the hub. Left: the job; middle: files it finished and its mean
-// per file; right: time on that job -- live elapsed of the file in progress
-// (highlighted) when it is on that job right now, otherwise the total spent.
-function agentJobsTable(a, slots) {
-  const jobs = a.jobs || [];
-  const shown = jobs.length > slots ? jobs.slice(0, slots - 1) : jobs;
-  const rows = shown.map(j => {
-    const live = a.online && j.current;
-    const tip = 'Job ' + j.job_id + ' "' + j.job_name + '" (' + j.job_state + ')' +
-      '\n' + (j.done ? j.done + ' file' + (j.done === 1 ? '' : 's') + ' done by this agent, ' + dur(j.avg_duration) +
-        ' each on average, ' + dur(j.total_duration) + ' in total' : 'nothing finished by this agent yet') +
-      (j.current ? '\nNow: ' + j.current.rel_path + ' -- running for ' + dur(j.current.elapsed) : '');
-    return '<tr title="' + esc(tip) + '">' +
-      '<td class="trunc">' + esc(j.job_name) + '</td>' +
-      '<td class="stat">' + (j.done ? j.done + ' × ' + dur(j.avg_duration) : '—') + '</td>' +
-      '<td class="rt' + (live ? ' live' : '') + '">' + (live ? '▶ ' + dur(j.current.elapsed) : (j.done ? dur(j.total_duration) : '')) + '</td></tr>';
-  }).concat(jobs.length > slots
-      ? ['<tr><td colspan="3" style="color:var(--dim)" title="' +
-           esc(jobs.slice(slots - 1).map(j => j.job_name + ': ' + (j.done ? j.done + ' done, ' + dur(j.total_duration) : 'in progress')).join("\n")) +
-           '">and ' + (jobs.length - shown.length) + ' more job' + (jobs.length - shown.length === 1 ? '' : 's') + '</td></tr>']
-      : [])
-    .concat(Array.from({ length: Math.max(0, slots - jobs.length) },
-      () => '<tr class="ghost"><td>&nbsp;</td><td class="stat"></td><td class="rt"></td></tr>'))
-    .join("");
-  return '<div class="kv' + (jobs.length ? '' : ' ghost') + '" style="margin-top:8px" title="Per job: files this agent finished × its mean time per file, then its time on that job: the live runtime of the file in progress (highlighted), or the total spent.">' +
-      '<span>Runtime by job</span><b style="color:var(--dim);font-weight:400;text-align:right">files × avg · time</b></div>' +
-    '<table class="active" style="margin-top:2px"><tbody>' + rows + '</tbody></table>';
 }
 
 function renderJobs() {
