@@ -501,6 +501,7 @@ def release_expired_claims(conn: sqlite3.Connection) -> int:
                claimed_by = NULL,
                claim_expires = 0,
                progress = '',
+               started_at = NULL,
                last_error = 'claim lease expired -- re-queued',
                updated_at = ?
          WHERE state IN ('claimed', 'running')
@@ -579,7 +580,7 @@ def claim_next(agent_id: str, *, lease_seconds: int = CLAIM_LEASE_SECONDS) -> Op
                            claimed_by = ?,
                            claim_expires = ?,
                            attempts = attempts + 1,
-                           started_at = COALESCE(started_at, ?),
+                           started_at = ?,
                            progress = '',
                            updated_at = ?
                      WHERE id = ?
@@ -689,6 +690,7 @@ def requeue_item(conn: sqlite3.Connection, item_id: int, agent_id: str, reason: 
                claimed_by = NULL,
                claim_expires = 0,
                progress = '',
+               started_at = NULL,
                last_error = ?,
                updated_at = ?
          WHERE id = ?
@@ -703,6 +705,22 @@ def requeue_item(conn: sqlite3.Connection, item_id: int, agent_id: str, reason: 
 # ---------------------------------------------------------------------------
 # Aggregates
 # ---------------------------------------------------------------------------
+
+def current_item_started(conn: sqlite3.Connection, agent_id: str) -> Optional[float]:
+    """When the file this agent is working on right now was claimed, or None
+    if it has nothing in flight.  `started_at` is per attempt (claim_next sets
+    it, requeue_item / release_expired_claims clear it), so the time since is
+    this run of whisperjav on that file, not time since it was first tried."""
+    row = conn.execute(
+        """
+        SELECT started_at FROM work_items
+         WHERE claimed_by = ? AND state IN ('claimed', 'running') AND started_at IS NOT NULL
+         ORDER BY started_at LIMIT 1
+        """,
+        (agent_id,),
+    ).fetchone()
+    return row["started_at"] if row else None
+
 
 def job_counts(conn: sqlite3.Connection, job_id: int) -> dict:
     counts = {s: 0 for s in ITEM_STATES}

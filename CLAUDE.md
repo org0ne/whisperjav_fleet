@@ -17,12 +17,15 @@ currently one, see "NFO selection" below).
 
 ## Commands
 
-There is no build step and no linter config. One automated suite exists, for
-the GPU-hold feature: it drives the real Agent against a fake hub, a fake
-bridge health endpoint and a fake `whisperjav`, no GPU or real hub needed.
+There is no build step and no linter config. The GPU-hold and fleet-hold
+suites drive the real Agent against a fake hub, a fake bridge health endpoint
+and a fake `whisperjav`, no GPU or real hub needed; the hub-side suites use
+`hub/db.py` alone on a throwaway database with a frozen clock.
 
 ```bash
-python3 -m unittest -v tests.test_gpu_hold     # ~25s
+python3 -m unittest -v tests.test_gpu_hold        # ~25s
+python3 -m unittest -v tests.test_fleet_hold      # ~20s; timing-sensitive, rerun a lone failure
+python3 -m unittest -v tests.test_hub_hold tests.test_file_clock   # instant, stdlib only
 ```
 
 ```bash
@@ -281,3 +284,10 @@ sweep would silently no-op.
 `hub/static/index.html` is a single dependency-free page: polls `/api/state`
 every 2.5s and re-renders. All UI state lives in that one payload; adding a panel
 usually means extending `get_state` rather than adding an endpoint.
+
+Cards are laid out to line up across a row: an optional section is rendered
+on every card whenever *any* card needs it, as an invisible `.ghost` on the
+cards that don't. The agent card's "This file" row is `agents[].file_elapsed`,
+time since the hub's claim of the file in progress; `work_items.started_at`
+is per attempt (set on every claim, cleared on requeue and lease expiry), so
+a file paused and resumed later does not carry its earlier time.

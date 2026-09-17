@@ -548,6 +548,9 @@ def get_state(_a=Auth):
         agents = []
         for row in conn.execute("SELECT * FROM agents ORDER BY agent_id"):
             status = json.loads(row["status_json"] or "{}")
+            # How long whisperjav has been on the agent's current file, from
+            # the hub's claim clock (the dashboard's "This file" row).
+            started = db.current_item_started(conn, row["agent_id"])
             agents.append({
                 "agent_id": row["agent_id"],
                 "online":   (now - row["last_seen"]) < db.AGENT_OFFLINE_SECONDS,
@@ -556,6 +559,7 @@ def get_state(_a=Auth):
                 "last_seen_ago": round(now - row["last_seen"], 1),
                 "status":   status,
                 "timing":   timing.get(row["agent_id"]),
+                "file_elapsed": round(now - started, 1) if started is not None else None,
             })
 
         jobs = []

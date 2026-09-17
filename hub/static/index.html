@@ -602,6 +602,8 @@ function renderAgents() {
         row('Last seen', a.last_seen_ago.toFixed(0) + 's ago') +
         row('This run', (c.done||0) + ' done · ' + (c.failed||0) + ' failed · ' + (c.skipped||0) + ' skipped' +
           ((c.yielded||0) ? ' · <span style="color:var(--warn)">' + c.yielded + ' yielded to Jasna</span>' : ''), 'class="trunc"') +
+        row('This file', a.online && cur.file && a.file_elapsed != null ? dur(a.file_elapsed) : '',
+            'style="color:var(--run)" title="How long whisperjav has been processing the current file, this attempt."', any.file) +
         row('Avg time', a.timing
               ? dur(a.timing.avg_duration) +
                 (a.timing.recent_n >= 3 && a.timing.recent_n < a.timing.done_total
