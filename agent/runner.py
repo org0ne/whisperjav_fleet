@@ -31,7 +31,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 # A lock whose owning process died leaves a file behind.  After this long with
 # no modification we assume the owner is gone and take it over.  Must exceed
@@ -244,7 +244,7 @@ def format_duration(seconds: float) -> str:
 
 def build_audit_text(version: str, timestamp: str, source_file: Path, cmd_display: str,
                      duration_seconds: float = 0.0, extra_info: str = "",
-                     agent_id: str = "", job_name: str = "") -> str:
+                     agent_id: str = "", job_name: str = "", diagnosis: str = "") -> str:
     lines = [
         f"WhisperJAV Version : {version}",
         f"Timestamp          : {timestamp}",
@@ -256,9 +256,159 @@ def build_audit_text(version: str, timestamp: str, source_file: Path, cmd_displa
     if job_name:
         lines.append(f"Fleet Job          : {job_name}")
     lines.append(f"Command            : {cmd_display}")
+    if diagnosis:
+        # Ahead of the raw output on purpose: the traceback is often 4000
+        # characters of framework internals, and the one line that explains it
+        # sits at the very bottom.  See `diagnose_failure`.
+        lines += ["", "--- Diagnosis ---", diagnosis.rstrip()]
     if extra_info:
         lines += ["", "--- Output / Error ---", extra_info]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Failure diagnosis  --  turn a known whisperjav traceback into a plain cause
+# ---------------------------------------------------------------------------
+
+class Diagnosis(NamedTuple):
+    label: str          # one line, for the dashboard, the log and the hub's last_error
+    detail: str         # several lines, for the .whisper-failed marker
+    environmental: bool # True: this worker is broken, the file is fine
+
+
+_HF_NOT_FOUND = re.compile(r"(\S+) is not a local folder and is not a valid model identifier")
+_HF_OFFLINE   = re.compile(r"We couldn't connect to 'https://huggingface\.co'|LocalEntryNotFoundError"
+                           r"|Cannot find the requested files in the disk cache")
+_HF_GATED     = re.compile(r"GatedRepoError|Cannot access gated repo|is a gated (?:repo|model)")
+_CUDA_BROKEN  = re.compile(r"Found no NVIDIA driver|CUDA driver version is insufficient"
+                           r"|Torch not compiled with CUDA enabled|no kernel image is available"
+                           r"|CUDA-capable device\(s\) is/are busy or unavailable"
+                           r"|CUDA unknown error|cudaErrorInitializationError|CUDA initialization")
+_CUDA_OOM     = re.compile(r"CUDA out of memory|torch\.OutOfMemoryError|OutOfMemoryError: CUDA")
+_OLLAMA_PORT  = re.compile(r"11434")
+_CONN_REFUSED = re.compile(r"Connection refused|Max retries exceeded|ConnectionError|Connection reset")
+_OLLAMA_PULL  = re.compile(r"model ['\"]?([^'\"\s]+)['\"]? not found, try pulling it first")
+_IMPORT_ERR   = re.compile(r"^(ModuleNotFoundError|ImportError): (.*)$", re.M)
+_FFMPEG_GONE  = re.compile(r"No such file or directory: 'ffmpeg'|ffmpeg(?: was)? not found", re.I)
+_DISK_FULL    = re.compile(r"No space left on device")
+
+
+def diagnose_failure(output: str) -> Optional[Diagnosis]:
+    """
+    Match whisperjav's combined output against the failure signatures we have
+    met before and name the cause in plain words.  `None` for anything not
+    recognised, so the caller falls back to the raw exit code.
+
+    `environmental` marks causes that belong to this worker rather than to
+    the file -- a missing GPU driver, an expired Hugging Face token, a broken
+    venv.  Failing the file for those would be wrong twice over: nothing is
+    wrong with the video, and the next claim would fail the same way within
+    minutes, burning through the whole queue.  The agent requeues those and
+    backs off instead (see `Agent._run_one`).  Keep file-dependent causes
+    (GPU out of memory) non-environmental, or a genuinely oversized file
+    would bounce between requeue and retry for ever.
+    """
+    if not output:
+        return None
+
+    m = _HF_NOT_FOUND.search(output)
+    if m:
+        model = m.group(1)
+        return Diagnosis(
+            f"Hugging Face would not resolve model {model} (expired/invalid token, or wrong name)",
+            f"Hugging Face would not resolve model '{model}'.\n"
+            "transformers raises this for ANY 401/404 from huggingface.co -- even when the model is\n"
+            "fully cached, because it still asks the hub about optional files (processor_config.json).\n"
+            "Most likely causes, in order:\n"
+            "  1. An expired or revoked token in ~/.cache/huggingface/token or $HF_TOKEN.  OAuth tokens\n"
+            "     from `hf auth login` expire after 30 days; from then on every model load gets a 401.\n"
+            "     Check: `hf auth whoami` (from the WhisperJAV venv).\n"
+            "     Fix:   `rm ~/.cache/huggingface/token`, or log in again with a token that still works.\n"
+            "  2. The model name in the job's args is misspelled, or the repo was renamed or removed.\n"
+            "  3. The repo is private or gated and the token has no access to it.\n"
+            "A cached model loads with no hub access at all: set HF_HUB_OFFLINE=1 in the agent's\n"
+            "service unit (see the commented line in agent/whisperjav-agent.service).",
+            True,
+        )
+    if _HF_GATED.search(output):
+        return Diagnosis(
+            "Hugging Face model is gated; this worker's token has no access",
+            "The model is a gated Hugging Face repo and this worker is either not logged in or logged\n"
+            "in with a token that has not been granted access.  Accept the model's terms on\n"
+            "huggingface.co with the account that owns the token, or log in with one that has.",
+            True,
+        )
+    if _HF_OFFLINE.search(output):
+        return Diagnosis(
+            "Hugging Face unreachable and the model is not fully cached on this worker",
+            "transformers could not reach huggingface.co (or HF_HUB_OFFLINE is set) and the model is\n"
+            "not completely present in ~/.cache/huggingface/hub, so it could not be loaded.\n"
+            "Restore network access for one run to fill the cache, or copy the model's\n"
+            "models--<org>--<name> directory from a worker that has it.",
+            True,
+        )
+    m = _CUDA_BROKEN.search(output)
+    if m:
+        return Diagnosis(
+            f"GPU not usable on this worker: {m.group(0)}",
+            f"PyTorch could not use the GPU: \"{m.group(0)}\".\n"
+            "Typical after a reboot that pulled in a kernel or NVIDIA driver update: the driver\n"
+            "module no longer matches the kernel, the module did not load, or the CUDA runtime in the\n"
+            "WhisperJAV venv no longer matches the driver.\n"
+            "Check: `nvidia-smi`; `dmesg | grep -i nvidia`; from the venv,\n"
+            "       `python -c 'import torch; print(torch.cuda.is_available())'`.",
+            True,
+        )
+    if _CUDA_OOM.search(output):
+        return Diagnosis(
+            "GPU out of memory",
+            "The GPU ran out of memory.  Either something else is holding VRAM (Ollama with a model\n"
+            "resident, Jasna, a second whisperjav, a stuck helper from an earlier run -- check\n"
+            "`nvidia-smi`), or this file plus the models the job selects need more than this GPU has.\n"
+            "Not treated as a worker fault: an oversized file would otherwise be retried for ever.",
+            False,
+        )
+    m = _OLLAMA_PULL.search(output)
+    if m:
+        return Diagnosis(
+            f"Ollama does not have model {m.group(1)} pulled on this worker",
+            f"The job translates through Ollama with model '{m.group(1)}', which this worker's Ollama\n"
+            f"has not pulled.  Run `ollama pull {m.group(1)}` on this machine.",
+            True,
+        )
+    if _OLLAMA_PORT.search(output) and _CONN_REFUSED.search(output):
+        return Diagnosis(
+            "Ollama (translate provider) unreachable on this worker",
+            "The job translates through Ollama, and the connection to it was refused or dropped.\n"
+            "Ollama is a separate daemon, not something whisperjav starts: check\n"
+            "`systemctl status ollama` (or however it is run here) and that `ollama_url` in the\n"
+            "agent config points at it.",
+            True,
+        )
+    m = _IMPORT_ERR.search(output)
+    if m:
+        return Diagnosis(
+            f"WhisperJAV install broken: {m.group(1)}: {m.group(2).strip()}",
+            f"whisperjav failed to import one of its own dependencies:\n  {m.group(0).strip()}\n"
+            "The venv was changed underneath it (a partial upgrade, a package removed, a Python\n"
+            "rebuilt by pyenv).  Reinstall or repair the WhisperJAV venv on this worker.",
+            True,
+        )
+    if _FFMPEG_GONE.search(output):
+        return Diagnosis(
+            "ffmpeg missing on this worker",
+            "whisperjav could not run ffmpeg.  Install it or put it on the PATH the agent's service\n"
+            "unit gives whisperjav (note the unit's PATH is not your login shell's).",
+            True,
+        )
+    if _DISK_FULL.search(output):
+        return Diagnosis(
+            "disk full (worker temp space or the media share)",
+            "A write failed with 'No space left on device'.  whisperjav stages audio and scene\n"
+            "files under /tmp/whisperjav; check `df -h /tmp` on this worker and the media share.",
+            True,
+        )
+    return None
 
 
 def safe_write(path: Path, text: str) -> bool:

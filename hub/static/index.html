@@ -576,6 +576,7 @@ function renderAgents() {
     gpu:   STATE.agents.some(a => a.online && a.status && a.status.gpu && a.status.gpu.mem_total),
     jasna: STATE.agents.some(a => jasnaBits(a, (a.status || {}).jasna || {}).row),
     hold:  STATE.agents.some(a => (a.status || {}).fleet_hold),
+    degr:  STATE.agents.some(a => a.online && (a.status || {}).degraded),
     avg:   STATE.agents.some(a => a.timing),
     file:  STATE.agents.some(a => ((a.status || {}).current || {}).file),
     prog:  STATE.agents.some(a => ((a.status || {}).current || {}).file && (a.status || {}).progress),
@@ -586,6 +587,7 @@ function renderAgents() {
     let cls = "off", txt = "offline";
     if (a.online && a.paused)      { cls = "warn"; txt = "paused"; }
     else if (a.online && cur.file) { cls = "run";  txt = "working"; }
+    else if (a.online && s.degraded) { cls = "err"; txt = "degraded"; }
     else if (a.online && s.state === "holding") { cls = "warn"; txt = "holding"; }
     else if (a.online)             { cls = "ok";   txt = "idle"; }
     const ignoring = a.ignore_jasna && (a.status && a.status.jasna && a.status.jasna.aware);
@@ -616,6 +618,9 @@ function renderAgents() {
         row('Fleet hold', s.fleet_hold ? esc(s.fleet_hold) +
               (cur.file ? (STATE.hold && STATE.hold.abort_in_flight ? ' · aborting current file' : ' · finishing current file') : '') : '',
             'class="trunc" style="color:var(--warn)" title="This agent has seen the fleet hold and is not claiming new files."', any.hold) +
+        row('Worker', a.online && s.degraded ? esc(s.degraded) : '',
+            'class="trunc" style="color:var(--err)" title="' + esc(s.degraded || "") + '\n\nwhisperjav failed on this machine for a reason that is the machine\'s, not the file\'s. ' +
+              'The file went back to the queue and this agent stops claiming for env_retry_seconds; the full explanation is in its journal. Clears by itself once a run succeeds."', any.degr) +
       '</div>' +
       (any.file
         ? '<div class="kv" style="margin-top:8px">' +

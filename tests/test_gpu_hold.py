@@ -108,14 +108,17 @@ class FakeHub:
         return f"http://127.0.0.1:{self.srv.server_address[1]}"
 
 
-def make_fake_whisperjav(tmp: str) -> str:
-    """A whisperjav that answers --version, records its pid, then sleeps (must be killed)."""
+def make_fake_whisperjav(tmp: str, body: str | None = None) -> str:
+    """
+    A whisperjav that answers --version, records its pid, then runs `body`
+    (default: sleeps until killed).
+    """
     bin_path = os.path.join(tmp, "fake-whisperjav")
     with open(bin_path, "w") as fh:
         fh.write(f"""#!/bin/sh
 if [ "$1" = "--version" ]; then echo "fake-whisperjav 1.0"; exit 0; fi
 echo $$ > "{tmp}/whisperjav.pid"
-sleep 300
+{body if body is not None else "sleep 300"}
 """)
     os.chmod(bin_path, os.stat(bin_path).st_mode | stat.S_IEXEC)
     return bin_path
@@ -140,7 +143,8 @@ def wait_for(cond, timeout: float, step: float = 0.2) -> bool:
 
 
 class Harness:
-    def __init__(self, mode="yield", release=1.0, while_resident=True, health_url=None):
+    def __init__(self, mode="yield", release=1.0, while_resident=True, health_url=None,
+                 whisperjav_body=None, cfg_extra=None):
         self.tmp = tempfile.mkdtemp(prefix="gpuhold-")
         target = os.path.join(self.tmp, "media"); os.makedirs(target)
         open(os.path.join(target, "clip.mp4"), "wb").write(b"\x00" * 16)
@@ -152,11 +156,14 @@ class Harness:
                         "lang_code": "qu", "force": False, "dry_run": False, "video_extensions": [".mp4"]}}
         self.hub = FakeHub(item)
         cfg = dict(agent_mod.DEFAULT_CONFIG)
-        cfg.update({"agent_id": "t-agent", "hub_url": self.hub.start(), "whisperjav_bin": make_fake_whisperjav(self.tmp),
+        self.media = target
+        cfg.update({"agent_id": "t-agent", "hub_url": self.hub.start(),
+                    "whisperjav_bin": make_fake_whisperjav(self.tmp, whisperjav_body),
                     "poll_interval_seconds": 0.5, "idle_poll_interval_seconds": 0.5, "heartbeat_seconds": 1,
                     "ollama_unload_on_abort": False,
                     "gpu_hold_url": hurl, "gpu_hold_mode": mode, "gpu_hold_poll_seconds": 1,
                     "gpu_hold_while_resident": while_resident, "gpu_hold_release_seconds": release})
+        cfg.update(cfg_extra or {})
         self.agent = Agent(cfg)
         self.thread = threading.Thread(target=self.agent.run, daemon=True)
 

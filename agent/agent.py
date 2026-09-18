@@ -54,6 +54,7 @@ DEFAULT_CONFIG = {
     "ollama_unload_on_abort": False,  # best-effort: drop the translate model from VRAM on abort
     "ollama_url": "http://127.0.0.1:11434",
     "storage_retry_seconds": 60,      # how long to stop claiming after the media mount vanishes
+    "env_retry_seconds": 300,         # how long to stop claiming after a failure that is this worker's fault
 
     # -- GPU load graphic ---------------------------------------------------
     # Sample whole-GPU load with nvidia-smi and send it on each check-in so the
@@ -409,6 +410,12 @@ class Agent:
         self._connected = threading.Event()
         # Work loop only: no claims until this time when the mount is gone.
         self._storage_down_until = 0.0
+        # Work loop only: no claims until this time after whisperjav failed for
+        # a reason that is this worker's, not the file's (see
+        # runner.diagnose_failure).  `_degraded` carries that reason to the
+        # dashboard until a run gets past it.
+        self._env_down_until = 0.0
+        self._degraded = ""
 
     # -- status -------------------------------------------------------------
 
@@ -421,6 +428,7 @@ class Agent:
             "state":       "working" if self.current else ("holding" if holding else "idle"),
             "gpu_hold":    self._gpu_hold.reason if held else "",
             "fleet_hold":  self._fleet_hold,
+            "degraded":    self._degraded,
             "jasna":       self._gpu_hold.summary(),
             "gpu":         self._gpu.snapshot(),
             "current":     self.current,
@@ -588,6 +596,7 @@ class Agent:
 
             elif (not self._paused and not self._fleet_hold and self._connected.is_set()
                   and time.time() >= self._storage_down_until
+                  and time.time() >= self._env_down_until
                   and not self._gpu_holding()):
                 try:
                     item = self.hub.claim()
@@ -835,16 +844,43 @@ class Agent:
 
         # -- Failure --------------------------------------------------------
         if exit_code != 0:
+            diag  = runner.diagnose_failure(output)
+            label = f"exit code {exit_code}" + (f": {diag.label}" if diag else "")
+
+            if diag and diag.environmental:
+                # This worker is broken, not the file: an expired Hugging
+                # Face token, a GPU driver that did not survive the reboot, a
+                # venv missing a package.  Same reasoning as the storage-down
+                # case in `_process`: marking the file failed would be wrong,
+                # and the next claim would fail identically within minutes,
+                # burning through the queue.  Hand it back without prejudice
+                # (another worker may be fine), say why loudly, and stop
+                # claiming for a while.  `_degraded` clears the moment a run
+                # gets past the point of failure.
+                hold = float(self.cfg.get("env_retry_seconds", 300))
+                self._env_down_until = time.time() + hold
+                self._degraded = diag.label
+                log(f"worker problem, not the file: {diag.label}", "ERROR")
+                for line in diag.detail.splitlines():
+                    log(f"    {line}", "ERROR")
+                log(f"requeued {item['rel_path']} and holding off claims for {hold:.0f}s", "ERROR")
+                self._requeue(item_id, f"worker {self.agent_id} degraded: {diag.label}")
+                return
+
             err = f"whisperjav exited with code {exit_code}.\n{output[-4000:]}"
             fail_text = runner.build_audit_text(
                 self.version, timestamp, video, cmd_line, elapsed, err,
                 agent_id=self.agent_id, job_name=job["name"],
+                diagnosis=diag.detail if diag else "",
             )
             runner.safe_write(failed_out, fail_text)
-            self._finish(item_id, "failed", f"exit code {exit_code}", duration=elapsed)
+            log(f"failed ({label}) after {runner.format_duration(elapsed)}: {item['rel_path']}", "ERROR")
+            self._degraded = ""
+            self._finish(item_id, "failed", label, duration=elapsed)
             return
 
         # -- Locate output ---------------------------------------------------
+        self._degraded = ""
         found_srt = runner.find_output_srt(video_dir, basename, srt_out)
         if not found_srt:
             err = "whisperjav exited 0 but no .srt output was found."

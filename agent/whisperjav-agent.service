@@ -13,6 +13,13 @@ Type=simple
 User=scott
 WorkingDirectory=/opt/whisperjav-fleet/agent
 Environment=FLEET_AGENT_CONFIG=/etc/whisperjav-agent/config.json
+# Optional: load models from ~/.cache/huggingface only, never asking the hub.
+# Makes every run immune to huggingface.co being down and to a stale token in
+# ~/.cache/huggingface/token (the OAuth ones from `hf auth login` expire after
+# 30 days, after which transformers reports every cached model as "not a valid
+# model identifier").  The cost: a job naming a model not yet cached fails
+# until someone downloads it by hand.
+#Environment=HF_HUB_OFFLINE=1
 ExecStart=/usr/bin/python3 /opt/whisperjav-fleet/agent/agent.py
 Restart=always
 RestartSec=10

@@ -131,6 +131,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-agent
 | `ollama_unload_on_abort` | On any abort, ask Ollama to drop the job's translate model from VRAM (`false` by default). See "Notes and limits" below. |
 | `ollama_url` | Where that request goes. Default `http://127.0.0.1:11434`. |
 | `storage_retry_seconds` | When the media share itself becomes unreachable (host down, stale mount), the item in hand is requeued rather than failed and the agent stops claiming for this long before trying again. Default `60`. |
+| `env_retry_seconds` | When whisperjav fails for a reason that is this worker's rather than the file's (expired Hugging Face token, GPU driver gone after a reboot, broken venv, Ollama down -- see "A broken worker is not a failed file" below), the item is requeued rather than failed and the agent stops claiming for this long. Default `300`. |
 | `gpu_hold_url` | Blank = off. The stash-jasna-bridge health URL, e.g. `http://127.0.0.1:8770/jasna/health`. While Jasna needs the GPU the agent stays off it. See "Sharing the GPU with Jasna". |
 | `gpu_hold_mode` | `yield` (default): abort and requeue the file in hand the moment Jasna starts. `finish`: let the current file complete, only stop claiming new ones. |
 | `gpu_hold_while_resident` | Also hold while the Jasna *process* is resident (it keeps its models in VRAM until the bridge's idle stop), not only while someone is watching. Default `true`. |
@@ -367,6 +368,11 @@ Unchanged from the batch script, plus two provenance lines:
 <basename>.whisper-lock            present only while a machine is working on it
 ```
 
+When the agent recognises the failure, `.whisper-failed` carries a
+`--- Diagnosis ---` section ahead of the raw output that names the cause in
+plain words and what to check (the batch script has no equivalent). The same
+one-line cause is the item's error on the dashboard and in the agent's log.
+
 ---
 
 ## Notes and limits
@@ -394,6 +400,23 @@ Unchanged from the batch script, plus two provenance lines:
   will ask Ollama to drop the job's `--translate-model` (`keep_alive: 0`) the
   moment an abort happens, best-effort. `ollama_url` defaults to
   `http://127.0.0.1:11434`.
+
+- **A broken worker is not a failed file.** `runner.diagnose_failure` matches
+  whisperjav's output against the failures met so far. Those that belong to
+  the machine rather than the video -- Hugging Face refusing to resolve a
+  cached model because the token in `~/.cache/huggingface/token` expired
+  (the OAuth tokens `hf auth login` issues last 30 days), a GPU driver that
+  did not survive a kernel update, a venv missing a package, Ollama not
+  running or missing the translate model, ffmpeg gone, disk full -- do not
+  fail the item. It goes back to the queue with the cause as its error,
+  another worker may take it, and this agent shows *degraded* on its card
+  with the cause, stops claiming for `env_retry_seconds`, and clears itself
+  once a run succeeds. Without this, one expired token failed every item in
+  the queue at one per two minutes and planted a `.whisper-failed` beside
+  each. Causes that can be the file's (GPU out of memory) still fail the
+  item, with the diagnosis in the marker. To take Hugging Face out of the
+  picture entirely on a worker whose models are all cached, uncomment
+  `HF_HUB_OFFLINE=1` in `agent/whisperjav-agent.service`.
 
 - **Command delivery is at-most-once.** A command issued exactly as the hub or
   agent restarts can be lost — click the button again. Fine for a manual

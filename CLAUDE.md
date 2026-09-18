@@ -191,6 +191,21 @@ sweep would silently no-op.
   agent fail every item in the queue at one per claim round-trip, since
   the pre-flight `stat()` raises instantly. Any other `OSError` is still a
   genuine `failed`.
+- **A broken worker is not a failed file.** Same principle one level up:
+  when whisperjav exits non-zero, `_run_one` runs its output through
+  `runner.diagnose_failure`, a table of known signatures that yields a
+  one-line label, a multi-line explanation, and an `environmental` flag.
+  Environmental causes (expired Hugging Face token, no GPU driver, broken
+  venv, Ollama down, ffmpeg missing, disk full) requeue the item with the
+  label as its reason, set `_env_down_until` (`env_retry_seconds`) and
+  `_degraded`, which rides along in the check-in so the card shows
+  *degraded* with the cause; a later run reaching the output stage clears
+  it. Non-environmental diagnoses (GPU OOM: could be the file) still fail
+  the item, with the explanation in a `--- Diagnosis ---` section of the
+  `.whisper-failed` marker ahead of the raw output. Keep file-dependent
+  causes out of the environmental set, or an oversized file would bounce
+  between requeue and retry for ever. `diagnose_failure` lives in `runner`
+  and stays pure string matching.
 - **`db.connect()` closes.** It is a context manager that closes the
   connection on exit -- not `sqlite3.Connection`'s own `with`, which only
   commits. A Connection is in a reference cycle with its statement cache, so
