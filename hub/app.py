@@ -401,13 +401,17 @@ def _fire_webhook(url: str, headers: dict, body: dict) -> None:
         pass
 
 
-def _maybe_fire_webhook(row: Any, state: str) -> None:
+def _maybe_fire_webhook(row: Any, state: str, rel_path: str | None = "") -> None:
+    """Fire the job's webhook for an item outcome.  `rel_path` is the item
+    that finished (defaults to the row's own); None means the whole job
+    finished with no items, which bypasses the per-file filter."""
     url = row["webhook_url"]
     if not url:
         return
-    filter_path = row["webhook_rel_path"]
-    if filter_path and filter_path != row["rel_path"]:
-        return
+    if rel_path is not None:
+        filter_path = row["webhook_rel_path"]
+        if filter_path and filter_path != (rel_path or row["rel_path"]):
+            return
     states = json.loads(row["webhook_states"] or '["done", "skipped"]')
     if state not in states:
         return
@@ -488,6 +492,22 @@ def agent_scan_result(agent_id: str, res: ScanResult, _a=Auth):
         )
         db.log_event(conn, f"Scan complete: {len(res.files)} file(s) found, {added} queued",
                      agent_id=agent_id, job_id=res.job_id)
+        if not res.files:
+            # Nothing to queue: every video under the target already has its
+            # SRT (the agent filters those out at scan time).  Had they been
+            # queued, each would have finished as 'skipped' and fired the
+            # webhook, so give the caller that same notification once here
+            # -- the Stash plugin relies on it to rescan for captions.
+            db.log_event(conn, "Nothing to do: every video already has its subtitle",
+                         agent_id=agent_id, job_id=res.job_id)
+            wh = conn.execute(
+                """
+                SELECT webhook_url, webhook_headers, webhook_body, webhook_states
+                  FROM jobs WHERE id = ?
+                """,
+                (res.job_id,),
+            ).fetchone()
+            _maybe_fire_webhook(wh, "skipped", rel_path=None)
         db.maybe_finish_job(conn, res.job_id)
     return {"ok": True, "added": added}
 

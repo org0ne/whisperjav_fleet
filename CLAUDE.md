@@ -181,6 +181,13 @@ sweep would silently no-op.
   (output exists, lock held, source gone, dry run); **`failed`** = tried and
   errored, writes a `.whisper-failed` marker; **requeue** = abandoned without
   prejudice (pause/stop), leaving the item `pending` and no marker.
+- **A job with no items is finished, not idle.** `scan_target` drops videos
+  whose SRT already exists, so a job over an already-subtitled folder scans
+  to zero files. `maybe_finish_job` treats that like any other job with
+  nothing outstanding (done, or auto-deleted), and `agent_scan_result` fires
+  the webhook once as if every file had been `skipped`. Before this, such a
+  job sat in `running` for ever and, at a low priority number, looked on the
+  dashboard like high-priority work nobody would start.
 - A lost completion report is safe by design: the lease expires and the item
   returns to the pool, costing a re-run at worst.
 - **An unreachable share is not a failed file.** `agent._process` checks the

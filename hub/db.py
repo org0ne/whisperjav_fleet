@@ -735,13 +735,20 @@ def job_counts(conn: sqlite3.Connection, job_id: int) -> dict:
 
 
 def maybe_finish_job(conn: sqlite3.Connection, job_id: int) -> None:
-    """Flip a running job to 'done' once no item can still be worked on."""
+    """Flip a running job to 'done' once no item can still be worked on.
+
+    A job with no items at all counts as finished too: the scan found every
+    video already subtitled (or the folder empty), so there is nothing to
+    claim and the job would otherwise sit in 'running' for ever.  Items are
+    inserted and the job set to 'running' in the scan_result transaction
+    before this runs, so an empty job here is genuinely empty, not mid-scan.
+    """
     row = conn.execute("SELECT name, state, auto_delete_on_finish FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if row is None or row["state"] != "running":
         return
     counts = job_counts(conn, job_id)
     outstanding = counts["pending"] + counts["claimed"] + counts["running"]
-    if counts["total"] > 0 and outstanding == 0:
+    if outstanding == 0:
         # auto_delete only fires on a clean finish -- a job with failures is
         # left in place (with its items' error text) for manual review, even
         # if the caller asked for cleanup. It can still be deleted by hand.
