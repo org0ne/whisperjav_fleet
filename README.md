@@ -346,14 +346,21 @@ subtitle gets picked up automatically. Two optional filters narrow when it
 fires: `webhook_rel_path` (a specific file in the job; blank fires for every
 item) and `webhook_states` (which outcomes trigger it; default
 `["done", "skipped"]`). A slow or unreachable target never delays or fails
-the agent's completion report.
+the agent's completion report, but every attempt is recorded on the job's
+events — `webhook delivered: <url> -> HTTP 200`, or an error-level
+`webhook FAILED: <url> -> <reason>` — so a callback aimed at the wrong
+address (a hub on another machine calling `localhost`, say) shows up
+instead of vanishing. Remember the URL is used *from the hub*: it has to be
+an address the hub can reach, not one that only works on the caller.
 
 `auto_delete_on_finish` (also API-only) deletes a job once it finishes with
 zero failed items, instead of leaving it in the list — for callers that
 submit many small one-off jobs (again, a Stash plugin submitting one job per
 scene is the motivating case) and have no use for a persistent history. Any
 failure keeps the job around regardless, so nothing about the failure is
-ever silently lost.
+ever silently lost. A job with a webhook is likewise kept until that webhook
+has actually been delivered; if the delivery fails the job stays, with the
+error on its events, rather than taking the only record of itself away.
 
 ---
 

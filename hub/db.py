@@ -238,6 +238,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN webhook_states TEXT NOT NULL DEFAULT '[\"done\", \"skipped\"]'")
     if "auto_delete_on_finish" not in job_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN auto_delete_on_finish INTEGER NOT NULL DEFAULT 0")
+    if "webhook_ok" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN webhook_ok INTEGER NOT NULL DEFAULT 0")
 
     agent_cols = {row["name"] for row in conn.execute("PRAGMA table_info(agents)")}
     if "abort_requested" not in agent_cols:
@@ -742,8 +744,16 @@ def maybe_finish_job(conn: sqlite3.Connection, job_id: int) -> None:
     claim and the job would otherwise sit in 'running' for ever.  Items are
     inserted and the job set to 'running' in the scan_result transaction
     before this runs, so an empty job here is genuinely empty, not mid-scan.
+
+    auto_delete_on_finish removes a cleanly finished job -- but a job that
+    has a webhook stays until that webhook has been *delivered*
+    (`record_webhook` deletes it then).  Otherwise a callback that never
+    reached its target would take the only record of the job with it.
     """
-    row = conn.execute("SELECT name, state, auto_delete_on_finish FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    row = conn.execute(
+        "SELECT name, state, auto_delete_on_finish, webhook_url, webhook_ok FROM jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
     if row is None or row["state"] != "running":
         return
     counts = job_counts(conn, job_id)
@@ -752,15 +762,43 @@ def maybe_finish_job(conn: sqlite3.Connection, job_id: int) -> None:
         # auto_delete only fires on a clean finish -- a job with failures is
         # left in place (with its items' error text) for manual review, even
         # if the caller asked for cleanup. It can still be deleted by hand.
-        if row["auto_delete_on_finish"] and counts["failed"] == 0:
-            log_event(conn, f"Job '{row['name']}' finished cleanly "
-                            f"({counts['done']} done, {counts['skipped']} skipped) and was auto-deleted")
-            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        clean = bool(row["auto_delete_on_finish"]) and counts["failed"] == 0
+        if clean and (not row["webhook_url"] or row["webhook_ok"]):
+            _auto_delete(conn, row["name"], job_id, counts)
             return
         conn.execute(
             "UPDATE jobs SET state = 'done', updated_at = ? WHERE id = ?",
             (now(), job_id),
         )
         log_event(conn, f"Job finished: {counts['done']} done, "
-                        f"{counts['failed']} failed, {counts['skipped']} skipped",
+                        f"{counts['failed']} failed, {counts['skipped']} skipped"
+                        + ("; auto-delete waits for the webhook" if clean else ""),
                   job_id=job_id)
+
+
+def _auto_delete(conn: sqlite3.Connection, name: str, job_id: int, counts: dict) -> None:
+    log_event(conn, f"Job '{name}' finished cleanly "
+                    f"({counts['done']} done, {counts['skipped']} skipped) and was auto-deleted")
+    conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+
+def record_webhook(conn: sqlite3.Connection, job_id: int, ok: bool, detail: str) -> None:
+    """Note a webhook delivery attempt on the job's event log, and finish
+    the auto-delete `maybe_finish_job` held back for it once one succeeds.
+    A failed delivery leaves the job in place, with the error on its
+    events, so a callback nobody is listening for is visible instead of
+    silently lost."""
+    row = conn.execute(
+        "SELECT name, state, auto_delete_on_finish FROM jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    if row is None:
+        return
+    log_event(conn, f"webhook {'delivered' if ok else 'FAILED'}: {detail}",
+              level="info" if ok else "error", job_id=job_id)
+    if not ok:
+        return
+    conn.execute("UPDATE jobs SET webhook_ok = 1 WHERE id = ?", (job_id,))
+    counts = job_counts(conn, job_id)
+    if row["state"] == "done" and row["auto_delete_on_finish"] and counts["failed"] == 0:
+        _auto_delete(conn, row["name"], job_id, counts)

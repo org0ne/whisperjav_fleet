@@ -22,15 +22,16 @@ class JobFinish(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         db.configure(Path(self.tmp) / "t.sqlite3")
 
-    def job(self, state="running", auto_delete=0) -> int:
+    def job(self, state="running", auto_delete=0, webhook_url="", webhook_ok=0) -> int:
         with db.connect() as c:
             cur = c.execute(
                 """
                 INSERT INTO jobs (name, target_dir, args_template, lang_code, state,
-                                  auto_delete_on_finish, created_at, updated_at)
-                VALUES ('j', '/x', '{INPUT_FILE}', 'qu', ?, ?, 1.0, 1.0)
+                                  auto_delete_on_finish, webhook_url, webhook_ok,
+                                  created_at, updated_at)
+                VALUES ('j', '/x', '{INPUT_FILE}', 'qu', ?, ?, ?, ?, 1.0, 1.0)
                 """,
-                (state, auto_delete),
+                (state, auto_delete, webhook_url, webhook_ok),
             )
             return cur.lastrowid
 
@@ -49,6 +50,15 @@ class JobFinish(unittest.TestCase):
     def finish(self, job_id: int) -> None:
         with db.connect() as c:
             db.maybe_finish_job(c, job_id)
+
+    def webhook(self, job_id: int, ok: bool) -> None:
+        with db.connect() as c:
+            db.record_webhook(c, job_id, ok, "http://stash/graphql -> " + ("HTTP 200" if ok else "refused"))
+
+    def events(self, job_id: int) -> list[tuple[str, str]]:
+        with db.connect() as c:
+            return [(r["level"], r["message"]) for r in c.execute(
+                "SELECT level, message FROM events WHERE job_id = ? ORDER BY id", (job_id,))]
 
     def test_empty_running_job_is_done(self):
         j = self.job()
@@ -76,6 +86,54 @@ class JobFinish(unittest.TestCase):
         j = self.job(auto_delete=1)
         self.item(j, "failed")
         self.finish(j)
+        self.assertEqual(self.state(j), "done")
+
+    # -- auto-delete waits for the webhook ---------------------------------
+
+    def test_webhook_job_is_not_deleted_on_finish(self):
+        j = self.job(auto_delete=1, webhook_url="http://stash/graphql")
+        self.item(j, "done")
+        self.finish(j)
+        self.assertEqual(self.state(j), "done")
+        self.assertIn("auto-delete waits for the webhook", self.events(j)[-1][1])
+
+    def test_delivered_webhook_completes_the_auto_delete(self):
+        j = self.job(auto_delete=1, webhook_url="http://stash/graphql")
+        self.item(j, "done")
+        self.finish(j)
+        self.webhook(j, ok=True)
+        self.assertIsNone(self.state(j))
+        self.assertEqual(self.events(j)[-1][0], "info")
+        self.assertIn("webhook delivered", self.events(j)[-1][1])
+
+    def test_failed_webhook_keeps_the_job_with_an_error(self):
+        j = self.job(auto_delete=1, webhook_url="http://stash/graphql")
+        self.item(j, "done")
+        self.finish(j)
+        self.webhook(j, ok=False)
+        self.assertEqual(self.state(j), "done")
+        level, msg = self.events(j)[-1]
+        self.assertEqual(level, "error")
+        self.assertIn("webhook FAILED", msg)
+        self.assertIn("refused", msg)
+
+    def test_webhook_delivered_before_finish_deletes_directly(self):
+        # Multi-item job: the watched file's webhook landed while other items
+        # were still running, so by finish time webhook_ok is already set.
+        j = self.job(auto_delete=1, webhook_url="http://stash/graphql")
+        self.item(j, "done"); self.item(j, "running")
+        self.webhook(j, ok=True)
+        self.assertEqual(self.state(j), "running")
+        with db.connect() as c:
+            c.execute("UPDATE work_items SET state = 'done' WHERE job_id = ?", (j,))
+        self.finish(j)
+        self.assertIsNone(self.state(j))
+
+    def test_webhook_without_auto_delete_only_logs(self):
+        j = self.job(webhook_url="http://stash/graphql")
+        self.item(j, "done")
+        self.finish(j)
+        self.webhook(j, ok=True)
         self.assertEqual(self.state(j), "done")
 
     def test_only_running_jobs_finish(self):

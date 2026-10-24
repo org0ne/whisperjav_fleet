@@ -24,6 +24,7 @@ import json
 import os
 import secrets
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
@@ -380,13 +381,15 @@ def agent_heartbeat(agent_id: str, beat: ItemBeat, _a=Auth):
     return {"ok": True, "abort": False, "reason": ""}
 
 
-def _fire_webhook(url: str, headers: dict, body: dict) -> None:
+def _fire_webhook(url: str, headers: dict, body: dict, job_id: Optional[int]) -> None:
     """
-    Best-effort, fire-and-forget. The hub has no idea what this request does
-    or whether it succeeds -- that's the point, it's a generic notification
-    mechanism, not a Stash (or anything-else) integration. A slow or dead
-    target must never delay or fail the agent's /complete call, which is why
-    this always runs off-thread and swallows every exception.
+    Best-effort, off-thread. The hub has no idea what this request does --
+    it's a generic notification mechanism, not a Stash (or anything-else)
+    integration -- and a slow or dead target must never delay or fail the
+    agent's /complete call, which is why this never runs inline and never
+    raises. It does *record* the outcome on the job's events, though: a
+    webhook that nobody answers (wrong address, expired key) used to vanish
+    without a trace, and the job with it when auto_delete was on.
     """
     try:
         req = urllib.request.Request(
@@ -395,13 +398,24 @@ def _fire_webhook(url: str, headers: dict, body: dict) -> None:
             method="POST",
             headers={"Content-Type": "application/json", **headers},
         )
-        with urllib.request.urlopen(req, timeout=15):
-            pass
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            ok, detail = True, f"{url} -> HTTP {resp.status}"
+    except urllib.error.HTTPError as exc:
+        snippet = exc.read(200).decode(errors="replace").strip()
+        ok, detail = False, f"{url} -> HTTP {exc.code}" + (f" {snippet}" if snippet else "")
+    except Exception as exc:
+        ok, detail = False, f"{url} -> {exc}"
+    if job_id is None:
+        return
+    try:
+        with db.connect() as conn:
+            db.record_webhook(conn, job_id, ok, detail)
     except Exception:
         pass
 
 
-def _maybe_fire_webhook(row: Any, state: str, rel_path: str | None = "") -> None:
+def _maybe_fire_webhook(row: Any, state: str, rel_path: str | None = "",
+                        job_id: Optional[int] = None) -> None:
     """Fire the job's webhook for an item outcome.  `rel_path` is the item
     that finished (defaults to the row's own); None means the whole job
     finished with no items, which bypasses the per-file filter."""
@@ -417,7 +431,7 @@ def _maybe_fire_webhook(row: Any, state: str, rel_path: str | None = "") -> None
         return
     headers = json.loads(row["webhook_headers"] or "{}")
     body = json.loads(row["webhook_body"] or "{}")
-    threading.Thread(target=_fire_webhook, args=(url, headers, body), daemon=True).start()
+    threading.Thread(target=_fire_webhook, args=(url, headers, body, job_id), daemon=True).start()
 
 
 @app.post("/api/agent/{agent_id}/complete")
@@ -442,7 +456,7 @@ def agent_complete(agent_id: str, res: ItemDone, _a=Auth):
                 level=level, agent_id=agent_id, job_id=row["job_id"],
             )
             db.maybe_finish_job(conn, row["job_id"])
-            _maybe_fire_webhook(row, res.state)
+            _maybe_fire_webhook(row, res.state, job_id=row["job_id"])
     return {"ok": ok}
 
 
@@ -507,7 +521,7 @@ def agent_scan_result(agent_id: str, res: ScanResult, _a=Auth):
                 """,
                 (res.job_id,),
             ).fetchone()
-            _maybe_fire_webhook(wh, "skipped", rel_path=None)
+            _maybe_fire_webhook(wh, "skipped", rel_path=None, job_id=res.job_id)
         db.maybe_finish_job(conn, res.job_id)
     return {"ok": True, "added": added}
 
