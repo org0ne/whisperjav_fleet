@@ -224,13 +224,13 @@ class GpuHoldUnit(unittest.TestCase):
     # -- process hold: a Jasna nothing manages (desktop app, no bridge) ------
 
     def test_process_hold_needs_the_vram_floor(self):
-        smi = _fake_nvidia_smi("1154434, /home/scott/Applications/jasna/jasna, 256")
+        smi = _fake_nvidia_smi("1154434, /opt/jasna/jasna, 256")
         g = GpuHold({"gpu_hold_url": "", "gpu_hold_process": "jasna", "gpu_hold_process_min_mb": 1024,
                      "nvidia_smi_bin": smi, "gpu_hold_release_seconds": 0})
         self.assertTrue(g.enabled)
         self.assertEqual(g.probe(), (False, ""), "idle app below the floor must not hold")
         self.assertEqual(g.summary()["seen"]["mem_mb"], 256, "but it is reported as seen")
-        _rewrite_fake_nvidia_smi(smi, "1154434, /home/scott/Applications/jasna/jasna, 9870")
+        _rewrite_fake_nvidia_smi(smi, "1154434, /opt/jasna/jasna, 9870")
         held, why = g.probe()
         self.assertTrue(held); self.assertEqual(why, "jasna on the GPU (9870 MB)")
         self.assertTrue(g.blocking())
@@ -287,7 +287,7 @@ class YieldMode(unittest.TestCase):
             h.stop()
 
     def test_desktop_jasna_without_bridge_yields_mid_file(self):
-        smi = _fake_nvidia_smi("1154434, /home/scott/Applications/jasna/jasna, 256")
+        smi = _fake_nvidia_smi("1154434, /opt/jasna/jasna, 256")
         h = Harness(mode="yield", release=1.0, health_url="",
                     cfg_extra={"gpu_hold_process": "jasna", "gpu_hold_process_min_mb": 1024,
                                "nvidia_smi_bin": smi, "gpu_sample": False}).start()
@@ -297,7 +297,7 @@ class YieldMode(unittest.TestCase):
             self.assertTrue(h.agent.status()["jasna"]["aware"])
             self.assertEqual(h.agent.status()["jasna"]["url"], "")
             # the user starts a restoration in the Jasna GUI
-            _rewrite_fake_nvidia_smi(smi, "1154434, /home/scott/Applications/jasna/jasna, 9870")
+            _rewrite_fake_nvidia_smi(smi, "1154434, /opt/jasna/jasna, 9870")
             self.assertTrue(wait_for(lambda: h.hub.requeues, 15), "file should be requeued")
             self.assertEqual(h.hub.requeues[0], "yielded to Jasna")
             self.assertTrue(wait_for(lambda: not pid_alive(h.pidfile), 10))
@@ -306,7 +306,7 @@ class YieldMode(unittest.TestCase):
             c = h.hub.claims; time.sleep(3)
             self.assertEqual(h.hub.claims, c, "must not claim while the restoration runs")
             # restoration done: the app drops back to its idle footprint
-            _rewrite_fake_nvidia_smi(smi, "1154434, /home/scott/Applications/jasna/jasna, 256")
+            _rewrite_fake_nvidia_smi(smi, "1154434, /opt/jasna/jasna, 256")
             self.assertTrue(wait_for(lambda: h.hub.claims > c, 10), "claims should resume")
         finally:
             h.stop()

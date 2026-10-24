@@ -121,7 +121,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-agent
 | Field | Meaning |
 |---|---|
 | `agent_id` | Name on the dashboard. `null` → hostname. |
-| `hub_url` | e.g. `http://192.168.11.50:8787` |
+| `hub_url` | e.g. `http://hub.lan:8787` |
 | `hub_user` / `hub_pass` | Only if the hub sets `HUB_USER`/`HUB_PASS`. |
 | `whisperjav_bin` | Blank → auto-detect (`$WHISPERJAV_BIN`, then the known venv paths, then `PATH`). |
 | `heartbeat_seconds` | Lease refresh interval, and how fast a Pause reaches an in-flight file. |

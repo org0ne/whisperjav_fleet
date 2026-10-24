@@ -58,7 +58,7 @@
 #     user, not group- or world-writable, executable, no setuid, one hard
 #     link.  `install -o root -g root -m 0755` satisfies them.
 
-HUB_URL="http://192.168.11.167:8787"
+HUB_URL="http://hub.lan:8787"       # set to your hub (see HOOK_CONF below)
 HUB_USER=""                 # only if the hub sets HUB_USER / HUB_PASS
 HUB_PASS=""
 HOLD_COMMANDS="sync scrub"  # space-separated; the hooked tasks that (re)arm the hold
