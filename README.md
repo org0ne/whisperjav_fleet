@@ -132,25 +132,28 @@ sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-agent
 | `ollama_url` | Where that request goes. Default `http://127.0.0.1:11434`. |
 | `storage_retry_seconds` | When the media share itself becomes unreachable (host down, stale mount), the item in hand is requeued rather than failed and the agent stops claiming for this long before trying again. Default `60`. |
 | `env_retry_seconds` | When whisperjav fails for a reason that is this worker's rather than the file's (expired Hugging Face token, GPU driver gone after a reboot, broken venv, Ollama down -- see "A broken worker is not a failed file" below), the item is requeued rather than failed and the agent stops claiming for this long. Default `300`. |
-| `gpu_hold_url` | Blank = off. The stash-jasna-bridge health URL, e.g. `http://127.0.0.1:8770/jasna/health`. While Jasna needs the GPU the agent stays off it. See "Sharing the GPU with Jasna". |
+| `gpu_hold_url` | Blank = off. The stash-jasna-bridge health URL, e.g. `http://127.0.0.1:8770/jasna/health`. While Jasna needs the GPU -- a viewer session, a batch restoration, or the managed process still resident -- the agent stays off it. See "Sharing the GPU with Jasna". |
+| `gpu_hold_process` | Blank = off. A process name, e.g. `jasna`: hold while `nvidia-smi` lists a GPU compute process of that name using at least `gpu_hold_process_min_mb` (default `1024`). The way to see a Jasna *desktop app* started by hand on a machine with no bridge. Combine with `gpu_hold_url` or use alone. |
 | `gpu_hold_mode` | `yield` (default): abort and requeue the file in hand the moment Jasna starts. `finish`: let the current file complete, only stop claiming new ones. |
 | `gpu_hold_while_resident` | Also hold while the Jasna *process* is resident (it keeps its models in VRAM until the bridge's idle stop), not only while someone is watching. Default `true`. |
 | `gpu_hold_poll_seconds` / `gpu_hold_release_seconds` | How often to re-check (`3`), and how long the hold must stay clear before claiming resumes (`30`), so a quick OFF/ON does not restart a long file just to yield it again. |
 
 Every field can also come from the environment: `FLEET_HUB_URL`,
 `FLEET_AGENT_ID`, `FLEET_HUB_USER`, `FLEET_HUB_PASS`, `WHISPERJAV_BIN`,
-`FLEET_GPU_HOLD_URL`.
+`FLEET_GPU_HOLD_URL`, `FLEET_GPU_HOLD_PROCESS`.
 
 ### Sharing the GPU with Jasna
 
 On a machine that also runs [Jasna](https://github.com/Kruk2/jasna) through
 [stash-jasna-bridge](https://github.com/org0ne/stash-jasna-bridge), the two do
 not fit on one card together: Jasna's hq preset is ~14 GB and the Ollama
-translate model ~9 GB more, on a 24 GB GPU. So Jasna wins. Set `gpu_hold_url`
-to the bridge's health endpoint (no auth needed) and the agent:
+translate model ~9 GB more, on a 24 GB GPU; on a 12 GB card nothing fits
+beside Jasna at all. So Jasna wins. Set `gpu_hold_url` to the bridge's health
+endpoint (no auth needed) and the agent:
 
-- **does not claim** a file while a viewer session is active or starting, or
-  while the Jasna process is still resident holding VRAM;
+- **does not claim** a file while a viewer session is active or starting,
+  while the bridge's batch queue is restoring a file, or while the Jasna
+  process is still resident holding VRAM;
 - in `yield` mode, **aborts the file in hand** within a few seconds of Jasna
   starting, kills whisperjav's process group, asks Ollama to unload the
   translate model (`ollama_unload_on_abort: true` recommended), and requeues
@@ -165,6 +168,20 @@ Two knobs outside this repo tighten it: a shorter `process_idle_minutes` in the
 bridge config so a lingering Jasna frees the card sooner, and a short
 `OLLAMA_KEEP_ALIVE` on the Ollama service. An unreachable bridge is treated as
 "no Jasna", so the agent keeps working if the bridge is down.
+
+**A Jasna nothing manages.** A worker where Jasna is the desktop app, started
+by hand with no bridge in front of it, has no health URL to poll. Set
+`gpu_hold_process: jasna` instead: the agent asks `nvidia-smi` for the GPU's
+compute processes on the same cadence and holds while one whose name matches
+uses at least `gpu_hold_process_min_mb` of VRAM. The idle app sits on the
+card at a few hundred MB, under the default 1024 MB floor, so merely having
+it open does not stop the fleet; a restoration pushes it into the gigabytes
+within seconds and the agent yields. This is a later signal than the bridge's
+`preparing` flag -- the process has already started allocating -- so a
+restoration may fail once on a tight card before the agent is out of the
+way; Jasna retries cleanly. Both signals can be set together on a bridge
+machine; the bridge is asked first. A missing or failing `nvidia-smi` is
+fail-open, the same as a bridge that is down.
 
 ---
 

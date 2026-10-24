@@ -452,20 +452,31 @@ async function refresh() {
 // really being read - version, preset, running/streaming, scene - not just
 // that a URL is configured. Media paths are never sent by the agent.
 function jasnaBits(a, j) {
-  if (!j.aware) return { cls: "off", pill: "jasna: off", tip: "gpu_hold_url not set on this agent", row: "" };
+  if (!j.aware) return { cls: "off", pill: "jasna: off", tip: "neither gpu_hold_url nor gpu_hold_process is set on this agent", row: "" };
   const b = j.bridge || {};
+  const seen = j.seen || {};
   // Most useful first: the row truncates on narrow cards (full text in the tooltip).
   const facts = [];
-  if (b.preset)    facts.push("preset " + b.preset);
-  if (b.scene_id)  facts.push("scene " + b.scene_id + (b.from_cache ? " (cache)" : ""));
-  facts.push(b.streaming ? "streaming" : b.running ? "running" : "not running");
-  if (b.warm && !b.running) facts.push("warm");
-  if (b.version)   facts.push("bridge " + b.version);
+  if (j.url) {
+    if (b.preset)    facts.push("preset " + b.preset);
+    if (b.scene_id)  facts.push("scene " + b.scene_id + (b.from_cache ? " (cache)" : ""));
+    facts.push(b.batch ? "batch running" : b.streaming ? "streaming" : b.running ? "running" : "not running");
+    if (b.batch_queued) facts.push(b.batch_queued + " queued");
+    if (b.warm && !b.running) facts.push("warm");
+    if (b.version)   facts.push("bridge " + b.version);
+  }
+  if (j.process) {
+    // A Jasna nothing manages (desktop app): what nvidia-smi last showed.
+    facts.push(seen.name ? seen.name + " " + seen.mem_mb + " MB on GPU" : "no " + j.process + " process on GPU");
+  }
   const probed = (j.probed_ago == null) ? "" : " · probed " + Math.round(j.probed_ago) + "s ago";
-  const tip = "Jasna-aware (" + (j.mode || "yield") + " mode) via " + (j.url || "") + probed;
+  const sources = [];
+  if (j.url)     sources.push(j.url);
+  if (j.process) sources.push("nvidia-smi process '" + j.process + "' ≥ " + j.process_min_mb + " MB");
+  const tip = "Jasna-aware (" + (j.mode || "yield") + " mode) via " + sources.join(" + ") + probed;
   if (a.ignore_jasna) return { cls: "off",  pill: "jasna: ignored", tip: "This agent is set to ignore Jasna GPU state (hub override); it will not yield.", row: "ignoring Jasna (override)" };
   if (!a.online)      return { cls: "off",  pill: "jasna: aware", tip, row: esc(facts.join(" · ")) };
-  if (!j.reachable)   return { cls: "err",  pill: "jasna: bridge down", tip: tip + " - the bridge did not answer; agent works normally", row: "bridge unreachable" };
+  if (j.url && !j.reachable) return { cls: "err",  pill: "jasna: bridge down", tip: tip + " - the bridge did not answer; agent works normally", row: "bridge unreachable" };
   if (j.held)         return { cls: "warn", pill: "holding for jasna", tip: tip + " - " + (j.reason || ""), row: esc((j.reason || "held") + " · " + facts.join(" · ")) };
   return { cls: "ok", pill: "jasna: aware", tip, row: esc(facts.join(" · ")) };
 }

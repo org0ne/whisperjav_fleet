@@ -63,10 +63,22 @@ DEFAULT_CONFIG = {
     "gpu_sample_seconds": 3,          # nvidia-smi cadence (~20ms per call)
     "nvidia_smi_bin": "",             # blank -> auto-detect on PATH
 
-    # -- GPU sharing with Jasna (stash-jasna-bridge) ------------------------
-    # Jasna has priority on the GPU. The agent polls the bridge's health URL
-    # and stays off the GPU while Jasna needs it. Blank URL = feature off.
+    # -- GPU sharing with Jasna ---------------------------------------------
+    # Jasna has priority on the GPU. Two independent signals, either or both:
+    #   gpu_hold_url      a stash-jasna-bridge health URL: hold while a viewer
+    #                     session is active or starting, a batch restoration
+    #                     is running, or (gpu_hold_while_resident) the managed
+    #                     Jasna process is resident.
+    #   gpu_hold_process  a process name: hold while nvidia-smi lists a GPU
+    #                     compute process of that name using at least
+    #                     gpu_hold_process_min_mb of VRAM. This is how a
+    #                     hand-driven Jasna desktop app, with no bridge, is
+    #                     seen. The idle app sits on the card at ~250 MB; the
+    #                     floor keeps that from counting.
+    # Both blank = feature off.
     "gpu_hold_url": "",               # e.g. http://127.0.0.1:8770/jasna/health
+    "gpu_hold_process": "",           # e.g. "jasna" (matched against the process name/path, case-insensitive)
+    "gpu_hold_process_min_mb": 1024,  # VRAM a matching process must hold before it counts
     "gpu_hold_mode": "yield",         # yield: abort+requeue the in-flight file the moment Jasna starts;
                                       # finish: let the current file complete, only stop claiming new ones
     "gpu_hold_poll_seconds": 3,       # how often to re-check the bridge while working or holding
@@ -165,23 +177,39 @@ class GpuHold:
     """
     Yield the GPU to Jasna.
 
-    Jasna (restored playback via stash-jasna-bridge) and this agent share one
+    Jasna (restored playback or batch restoration) and this agent share one
     GPU, and their VRAM does not fit together: Jasna's hq preset is ~14 GB and
-    the Ollama translate model another ~9 GB on a 24 GB card. So Jasna wins:
-    while it needs the GPU the agent does not claim files, and in "yield" mode
-    it also aborts and requeues the file it is working on.
+    the Ollama translate model another ~9 GB on a 24 GB card -- on a 12 GB
+    card nothing fits beside Jasna at all. So Jasna wins: while it needs the
+    GPU the agent does not claim files, and in "yield" mode it also aborts and
+    requeues the file it is working on.
 
-    The signal is the bridge's public health endpoint (no auth):
+    Two signals, either or both:
+
+    The bridge's public health endpoint (`gpu_hold_url`, no auth):
       active           a viewer session is live
       preparing        a session is being created (models loading - yield NOW,
                        before Jasna tries to allocate)
-      jasna.running    the Jasna process is resident, i.e. still holding VRAM
-                       even with nobody watching, until the bridge's idle stop
-    Fail-open: an unreachable bridge means no Jasna, so the agent keeps working.
+      batch.running    the bridge's batch queue is restoring a file (a
+                       separate Jasna process, so `jasna.running` stays false)
+      jasna.running    the managed Jasna process is resident, i.e. still
+                       holding VRAM even with nobody watching, until the
+                       bridge's idle stop
+
+    The GPU's own process list (`gpu_hold_process`): nvidia-smi reports a
+    compute process whose name matches, using at least
+    `gpu_hold_process_min_mb`. The only way to see a Jasna that nothing
+    manages -- the desktop app started by hand on a machine with no bridge.
+
+    Fail-open: an unreachable bridge, or a missing/failing nvidia-smi, means
+    no Jasna, so the agent keeps working.
     """
 
     def __init__(self, cfg: dict):
         self.url = (cfg.get("gpu_hold_url") or "").strip()
+        self.process = (cfg.get("gpu_hold_process") or "").strip().lower()
+        self.process_min_mb = max(0, int(cfg.get("gpu_hold_process_min_mb", 1024) or 0))
+        self.smi_bin = (cfg.get("nvidia_smi_bin") or "").strip() or shutil.which("nvidia-smi") or ""
         self.mode = str(cfg.get("gpu_hold_mode", "yield")).lower()
         self.poll = max(1.0, float(cfg.get("gpu_hold_poll_seconds", 3)))
         self.while_resident = bool(cfg.get("gpu_hold_while_resident", True))
@@ -191,18 +219,42 @@ class GpuHold:
         self._last_held_at = 0.0
         self._lock = threading.Lock()
         self._warned_unreachable = False
+        self._warned_smi = False
         self.reachable = False
         self.last_probe_at = 0.0
         self.bridge: dict = {}   # what the bridge last published (no filesystem paths)
+        self.seen: dict = {}     # the matching GPU process last seen, if any
 
     @property
     def enabled(self) -> bool:
-        return bool(self.url)
+        return bool(self.url or self.process)
+
+    def describe(self) -> str:
+        parts = []
+        if self.url:
+            parts.append(self.url)
+        if self.process:
+            parts.append(f"process '{self.process}' >= {self.process_min_mb} MB")
+        return " + ".join(parts)
 
     def probe(self) -> tuple[bool, str]:
-        """Ask the bridge now. Returns (held, reason) and updates cached state."""
+        """Ask the bridge and/or the GPU now. Returns (held, reason) and
+        updates cached state. The bridge is asked first: its `preparing` flag
+        arrives before Jasna has allocated anything, which the process list
+        cannot know."""
         if not self.enabled:
             return False, ""
+        if self.url:
+            held, reason = self._probe_bridge()
+            if held:
+                return self._set(True, reason)
+        if self.process:
+            held, reason = self._probe_process()
+            if held:
+                return self._set(True, reason)
+        return self._set(False, "")
+
+    def _probe_bridge(self) -> tuple[bool, str]:
         try:
             with urllib.request.urlopen(self.url, timeout=3) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -216,11 +268,13 @@ class GpuHold:
             with self._lock:
                 self.reachable = False
                 self.last_probe_at = time.time()
-            return self._set(False, "")
+            return False, ""
         jasna = data.get("jasna") or {}
         session = data.get("session") or {}
         preparing = data.get("preparing") or {}
         stream = data.get("stream") or {}
+        batch = data.get("batch") or {}
+        batch_running = batch.get("running") or {}
         with self._lock:
             self.reachable = True
             self.last_probe_at = time.time()
@@ -231,19 +285,79 @@ class GpuHold:
                 "running":   bool(jasna.get("running")),
                 "streaming": bool(jasna.get("streaming")),
                 "warm":      bool(jasna.get("warm")),
-                "preset":    jasna.get("preset") or session.get("preset") or stream.get("preset"),
-                "scene_id":  session.get("scene_id") or preparing.get("scene_id"),
+                "preset":    (jasna.get("preset") or session.get("preset") or stream.get("preset")
+                              or batch_running.get("preset")),
+                "scene_id":  (session.get("scene_id") or preparing.get("scene_id")
+                              or batch_running.get("scene_id")),
                 "viewer":    bool(data.get("active")),
                 "preparing": bool(preparing),
                 "from_cache": bool(session.get("from_cache")),
+                "batch":     bool(batch_running),
+                "batch_queued": int(batch.get("queued") or 0),
             }
         if data.get("active"):
-            return self._set(True, "viewer active")
+            return True, "viewer active"
         if data.get("preparing"):
-            return self._set(True, "session starting")
+            return True, "session starting"
+        if batch_running:
+            return True, "batch restoration running"
         if self.while_resident and jasna.get("running"):
-            return self._set(True, "Jasna resident, holding VRAM")
-        return self._set(False, "")
+            return True, "Jasna resident, holding VRAM"
+        return False, ""
+
+    def _probe_process(self) -> tuple[bool, str]:
+        rows = self._gpu_processes()
+        with self._lock:
+            self.last_probe_at = time.time()
+            self.seen = {}
+        if rows is None:
+            return False, ""
+        for pid, name, mem_mb in rows:
+            if self.process not in name.lower():
+                continue
+            with self._lock:
+                self.seen = {"pid": pid, "name": os.path.basename(name), "mem_mb": mem_mb}
+            if mem_mb >= self.process_min_mb:
+                return True, f"{os.path.basename(name)} on the GPU ({mem_mb} MB)"
+        return False, ""
+
+    def _gpu_processes(self) -> Optional[list[tuple[int, str, int]]]:
+        """(pid, process name, MiB) per GPU compute process, or None when
+        nvidia-smi is missing or fails (fail-open)."""
+        if not self.smi_bin:
+            if not self._warned_smi:
+                log("gpu hold: nvidia-smi not found; the process hold cannot see Jasna", "WARN")
+                self._warned_smi = True
+            return None
+        try:
+            out = subprocess.run(
+                [self.smi_bin, "--query-compute-apps=pid,process_name,used_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=8,
+            )
+            if out.returncode != 0:
+                raise RuntimeError(f"exit {out.returncode}: {out.stderr.strip()[:120]}")
+            rows = []
+            for line in out.stdout.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 3:
+                    continue
+                # process_name may itself contain commas: pid is first, memory last.
+                pid, mem = parts[0], parts[-1]
+                name = ",".join(parts[1:-1])
+                try:
+                    rows.append((int(pid), name, int(mem)))
+                except ValueError:
+                    continue   # "[Not Supported]" and friends
+            if self._warned_smi:
+                log("gpu hold: nvidia-smi answering again")
+                self._warned_smi = False
+            return rows
+        except Exception as exc:
+            if not self._warned_smi:
+                log(f"gpu hold: nvidia-smi process query failed ({exc}); assuming Jasna is not running", "WARN")
+                self._warned_smi = True
+            return None
 
     def _set(self, held: bool, reason: str) -> tuple[bool, str]:
         with self._lock:
@@ -256,8 +370,9 @@ class GpuHold:
         return held, reason
 
     def summary(self) -> dict:
-        """For the agent's check-in: is this agent Jasna-aware, and what did the
-        bridge last say. Rendered on the hub's agent card."""
+        """For the agent's check-in: is this agent Jasna-aware, through what,
+        and what did the bridge / the GPU last say. Rendered on the hub's
+        agent card."""
         if not self.enabled:
             return {"aware": False}
         with self._lock:
@@ -265,11 +380,14 @@ class GpuHold:
                 "aware":      True,
                 "mode":       self.mode,
                 "url":        self.url,
+                "process":    self.process,
+                "process_min_mb": self.process_min_mb,
                 "reachable":  self.reachable,
                 "held":       self.held,
                 "reason":     self.reason,
                 "probed_ago": round(time.time() - self.last_probe_at, 1) if self.last_probe_at else None,
                 "bridge":     dict(self.bridge),
+                "seen":       dict(self.seen),
             }
 
     def blocking(self) -> bool:
@@ -404,7 +522,7 @@ class Agent:
         # only; a file already in flight runs to completion.
         self._fleet_hold = ""
         # Hub override: when true this agent ignores Jasna GPU state entirely
-        # (keeps claiming and never yields), even if gpu_hold_url is set.
+        # (keeps claiming and never yields), even if a GPU hold is configured.
         self._ignore_jasna = False
         self._pending_scan: Optional[dict] = None
         self._connected = threading.Event()
@@ -572,7 +690,7 @@ class Agent:
         log(f"hub       : {self.cfg['hub_url']}")
         log(f"whisperjav: {self.binary} ({self.version})")
         if self._gpu_hold.enabled:
-            log(f"gpu hold  : {self._gpu_hold.url} (mode {self._gpu_hold.mode}, "
+            log(f"gpu hold  : {self._gpu_hold.describe()} (mode {self._gpu_hold.mode}, "
                 f"{'also while resident' if self._gpu_hold.while_resident else 'active sessions only'})")
 
         presence = threading.Thread(target=self._presence_loop, daemon=True)
@@ -945,7 +1063,8 @@ def load_config(path: Optional[str]) -> dict:
     # Environment overrides make container/systemd deployment easy.
     for key, env in (("hub_url", "FLEET_HUB_URL"), ("agent_id", "FLEET_AGENT_ID"),
                      ("hub_user", "FLEET_HUB_USER"), ("hub_pass", "FLEET_HUB_PASS"),
-                     ("whisperjav_bin", "WHISPERJAV_BIN"), ("gpu_hold_url", "FLEET_GPU_HOLD_URL")):
+                     ("whisperjav_bin", "WHISPERJAV_BIN"), ("gpu_hold_url", "FLEET_GPU_HOLD_URL"),
+                     ("gpu_hold_process", "FLEET_GPU_HOLD_PROCESS")):
         if os.environ.get(env):
             cfg[key] = os.environ[env]
     return cfg

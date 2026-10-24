@@ -134,11 +134,15 @@ Three concerns, deliberately separated in `agent/agent.py`:
   the (already-aborted) transcription's outcome. Lives in `agent.py`, not
   `runner.py`, which is deliberately HTTP-free.
 
-- **GPU yield watchdog** (inside `_run_one`, only when `gpu_hold_url` is set
-  and `gpu_hold_mode` is `yield`) — polls the stash-jasna-bridge health URL
-  every `gpu_hold_poll_seconds` and, the moment it reports a viewer session
-  active or `preparing` (or the Jasna process resident, with
-  `gpu_hold_while_resident`), sets the same `_abort` event the heartbeat uses.
+- **GPU yield watchdog** (inside `_run_one`, only when a GPU hold is
+  configured and `gpu_hold_mode` is `yield`) — every `gpu_hold_poll_seconds`
+  it polls the stash-jasna-bridge health URL (`gpu_hold_url`) and/or asks
+  `nvidia-smi` for GPU compute processes (`gpu_hold_process`), and the moment
+  the bridge reports a viewer session active or `preparing`, a batch
+  restoration running, or the Jasna process resident (with
+  `gpu_hold_while_resident`) — or a matching process holds at least
+  `gpu_hold_process_min_mb` of VRAM — sets the same `_abort` event the
+  heartbeat uses.
   So a yield rides the existing abort path end to end: process group killed,
   Ollama unload (if enabled), clean requeue — but with reason "yielded to
   Jasna" and `counts["yielded"]` bumped. `GpuHold` (module level) owns the
@@ -146,9 +150,12 @@ Three concerns, deliberately separated in `agent/agent.py`:
   (`_gpu_holding`) uses `GpuHold.blocking()`, which adds a release-window
   hysteresis so a quick OFF/ON in Stash does not restart a long file just to
   yield it again. Jasna has priority by design: the VRAM does not fit both.
-  Fail-open: an unreachable bridge means no Jasna. The bridge knows nothing of
-  the fleet; the coupling is one public read-only URL, deliberately, so this
-  feature stays out of the bridge repo.
+  Fail-open: an unreachable bridge, or a missing `nvidia-smi`, means no
+  Jasna. The bridge knows nothing of the fleet; the coupling is one public
+  read-only URL, deliberately, so this feature stays out of the bridge repo.
+  The process hold exists for a worker whose Jasna is the desktop app run by
+  hand, with no bridge at all (rtx3060): the GPU's own process list is the
+  only thing that can see it.
 
 `runner._terminate_tree` kills the child's whole **process group** (children are
 spawned with `start_new_session=True`), because WhisperJAV spawns helpers that

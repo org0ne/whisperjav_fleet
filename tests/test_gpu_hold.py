@@ -40,6 +40,7 @@ class FakeHealth:
         self.active = False
         self.preparing = None
         self.running = False
+        self.batch = None          # the bridge's batch.running brief, or None
         self.up = True
 
     def start(self):
@@ -51,7 +52,8 @@ class FakeHealth:
                 if not state.up:
                     self.send_response(503); self.end_headers(); return
                 body = json.dumps({"active": state.active, "preparing": state.preparing,
-                                   "jasna": {"running": state.running}}).encode()
+                                   "jasna": {"running": state.running},
+                                   "batch": {"enabled": True, "running": state.batch, "queued": 0}}).encode()
                 self.send_response(200); self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
         self.srv = _serve(H)
@@ -205,6 +207,60 @@ class GpuHoldUnit(unittest.TestCase):
         g = GpuHold({"gpu_hold_url": ""})
         self.assertFalse(g.enabled); self.assertFalse(g.blocking())
 
+    def test_batch_restoration_holds(self):
+        # The bridge's batch queue runs Jasna as a separate process, so
+        # jasna.running stays false while a restoration is in flight.
+        h = FakeHealth(); url = h.start()
+        g = GpuHold({"gpu_hold_url": url, "gpu_hold_release_seconds": 0})
+        self.assertEqual(g.probe(), (False, ""))
+        h.batch = {"id": "abc", "scene_id": "30474", "preset": "LTX", "state": "running"}
+        self.assertEqual(g.probe(), (True, "batch restoration running"))
+        self.assertTrue(g.summary()["bridge"]["batch"])
+        self.assertEqual(g.summary()["bridge"]["preset"], "LTX")
+        h.batch = None
+        self.assertFalse(g.probe()[0])
+        h.srv.shutdown(); h.srv.server_close()
+
+    # -- process hold: a Jasna nothing manages (desktop app, no bridge) ------
+
+    def test_process_hold_needs_the_vram_floor(self):
+        smi = _fake_nvidia_smi("1154434, /home/scott/Applications/jasna/jasna, 256")
+        g = GpuHold({"gpu_hold_url": "", "gpu_hold_process": "jasna", "gpu_hold_process_min_mb": 1024,
+                     "nvidia_smi_bin": smi, "gpu_hold_release_seconds": 0})
+        self.assertTrue(g.enabled)
+        self.assertEqual(g.probe(), (False, ""), "idle app below the floor must not hold")
+        self.assertEqual(g.summary()["seen"]["mem_mb"], 256, "but it is reported as seen")
+        _rewrite_fake_nvidia_smi(smi, "1154434, /home/scott/Applications/jasna/jasna, 9870")
+        held, why = g.probe()
+        self.assertTrue(held); self.assertEqual(why, "jasna on the GPU (9870 MB)")
+        self.assertTrue(g.blocking())
+        _rewrite_fake_nvidia_smi(smi, "")
+        self.assertFalse(g.probe()[0]); self.assertEqual(g.summary()["seen"], {})
+
+    def test_process_hold_ignores_other_processes_and_is_case_insensitive(self):
+        smi = _fake_nvidia_smi("4242, /usr/bin/python3, 8000\n4243, /opt/Jasna/JASNA, 5000")
+        g = GpuHold({"gpu_hold_process": "jasna", "gpu_hold_process_min_mb": 1024, "nvidia_smi_bin": smi})
+        self.assertEqual(g.probe(), (True, "JASNA on the GPU (5000 MB)"))
+        g2 = GpuHold({"gpu_hold_process": "topaz", "gpu_hold_process_min_mb": 1024, "nvidia_smi_bin": smi})
+        self.assertFalse(g2.probe()[0])
+
+    def test_process_hold_fails_open_without_nvidia_smi(self):
+        g = GpuHold({"gpu_hold_process": "jasna", "nvidia_smi_bin": "/no/such/nvidia-smi"})
+        self.assertTrue(g.enabled)
+        self.assertEqual(g.probe(), (False, ""))
+        self.assertFalse(g.blocking())
+
+    def test_bridge_and_process_combine(self):
+        h = FakeHealth(); url = h.start()
+        smi = _fake_nvidia_smi("1, /x/jasna, 3000")
+        g = GpuHold({"gpu_hold_url": url, "gpu_hold_process": "jasna", "nvidia_smi_bin": smi,
+                     "gpu_hold_release_seconds": 0})
+        self.assertEqual(g.probe()[1], "jasna on the GPU (3000 MB)")
+        h.preparing = {"scene_id": "1"}
+        self.assertEqual(g.probe()[1], "session starting", "bridge signal is checked first")
+        self.assertIn("process 'jasna'", g.describe()); self.assertIn(url, g.describe())
+        h.srv.shutdown(); h.srv.server_close()
+
 
 class YieldMode(unittest.TestCase):
     def test_mid_file_yield_then_no_reclaim_then_resume(self):
@@ -227,6 +283,31 @@ class YieldMode(unittest.TestCase):
             h.health.preparing = None; h.health.running = False; h.health.active = False
             self.assertTrue(wait_for(lambda: h.hub.claims > c, 10), "claims should resume once released")
             self.assertEqual(h.agent.status()["state"], "idle")
+        finally:
+            h.stop()
+
+    def test_desktop_jasna_without_bridge_yields_mid_file(self):
+        smi = _fake_nvidia_smi("1154434, /home/scott/Applications/jasna/jasna, 256")
+        h = Harness(mode="yield", release=1.0, health_url="",
+                    cfg_extra={"gpu_hold_process": "jasna", "gpu_hold_process_min_mb": 1024,
+                               "nvidia_smi_bin": smi, "gpu_sample": False}).start()
+        try:
+            self.assertTrue(wait_for(lambda: h.hub.claims >= 1 and os.path.exists(h.pidfile), 15),
+                            "idle desktop app below the floor must not stop claims")
+            self.assertTrue(h.agent.status()["jasna"]["aware"])
+            self.assertEqual(h.agent.status()["jasna"]["url"], "")
+            # the user starts a restoration in the Jasna GUI
+            _rewrite_fake_nvidia_smi(smi, "1154434, /home/scott/Applications/jasna/jasna, 9870")
+            self.assertTrue(wait_for(lambda: h.hub.requeues, 15), "file should be requeued")
+            self.assertEqual(h.hub.requeues[0], "yielded to Jasna")
+            self.assertTrue(wait_for(lambda: not pid_alive(h.pidfile), 10))
+            self.assertEqual(h.agent.status()["state"], "holding")
+            self.assertIn("9870 MB", h.agent.status()["gpu_hold"])
+            c = h.hub.claims; time.sleep(3)
+            self.assertEqual(h.hub.claims, c, "must not claim while the restoration runs")
+            # restoration done: the app drops back to its idle footprint
+            _rewrite_fake_nvidia_smi(smi, "1154434, /home/scott/Applications/jasna/jasna, 256")
+            self.assertTrue(wait_for(lambda: h.hub.claims > c, 10), "claims should resume")
         finally:
             h.stop()
 
@@ -311,13 +392,20 @@ class ClaimGate(unittest.TestCase):
 
 
 def _fake_nvidia_smi(line: str) -> str:
-    """Write a fake nvidia-smi to a temp dir and return its path."""
+    """Write a fake nvidia-smi to a temp dir and return its path. `line` may
+    hold literal \\n for several rows."""
     d = tempfile.mkdtemp(prefix="fakesmi-")
     p = os.path.join(d, "nvidia-smi")
-    with open(p, "w") as f:
-        f.write("#!/bin/sh\nprintf '%s\\n' " + repr(line) + "\n")
+    _rewrite_fake_nvidia_smi(p, line)
     os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return p
+
+
+def _rewrite_fake_nvidia_smi(path: str, line: str) -> None:
+    """Change what an existing fake nvidia-smi prints (simulates a process
+    appearing on or leaving the GPU between two probes)."""
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\nprintf '%b\\n' " + repr(line) + "\n")
 
 
 class GpuSamplerTest(unittest.TestCase):
