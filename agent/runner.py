@@ -66,6 +66,7 @@ def find_whisperjav_bin(configured: str = "") -> str:
         return os.path.expanduser(override)
 
     candidates = [
+        "~/Applications/WhisperJav-1.10.0/.venv/bin/whisperjav",
         "~/Applications/WhisperJav/.venv/bin/whisperjav",
         "~/Applications/WhsiperJav/.venv/bin/whisperjav",   # legacy misspelling
         "~/Applications/WhisperJav/.venv/Scripts/whisperjav.exe",

@@ -292,7 +292,11 @@ the same job concurrently, each on a different file.
 the same template format as `WHISPERJAV_ARGS` in the batch script, including
 `{INPUT_FILE}`, `{TRANSLATE_TITLE}`, `{TRANSLATE_ACTRESS}` and
 `{TRANSLATE_PLOT}`. **Profiles** are named starting points for that box; the
-batch script's current recipe is seeded as `qwen-galgame-translate`. The
+batch script's current recipe is seeded as `qwen-galgame-translate`. Workers on
+WhisperJAV 1.10 also use `cohere-translate-1.10`, which publishes `.co.srt`
+so its subtitles are easy to tell from the older `.qu.srt`. The skip check
+only looks at the job's own language code, so a `.co` job over a folder of
+`.qu.srt` files transcribes those videos again. The
 arguments are *snapshotted onto the job at creation*, so editing a profile
 later never changes a job already queued.
 
