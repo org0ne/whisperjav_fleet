@@ -123,7 +123,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now whisperjav-agent
 | `agent_id` | Name on the dashboard. `null` → hostname. |
 | `hub_url` | e.g. `http://hub.lan:8787` |
 | `hub_user` / `hub_pass` | Only if the hub sets `HUB_USER`/`HUB_PASS`. |
-| `whisperjav_bin` | Blank → auto-detect (`$WHISPERJAV_BIN`, then the known venv paths, then `PATH`). |
+| `whisperjav_bin` | Blank → auto-detect (`$WHISPERJAV_BIN`, then the newest `~/Applications/WhisperJav-<version>`, then the unversioned venv paths, then `PATH`). Install each release beside the last so the previous one stays as a fallback; set this to hold a worker on a given release. |
 | `heartbeat_seconds` | Lease refresh interval, and how fast a Pause reaches an in-flight file. |
 | `allow_browse` | Whether this agent answers the dashboard's folder picker. |
 | `path_map` | Prefix rewrites for a machine that mounts the share elsewhere. Empty when every machine uses the same path. |

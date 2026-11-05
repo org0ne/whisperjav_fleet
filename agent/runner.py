@@ -52,8 +52,14 @@ def find_whisperjav_bin(configured: str = "") -> str:
 
         1. explicit config value      -- per-machine override from config.json
         2. $WHISPERJAV_BIN            -- per-machine env override
-        3. known venv locations       -- the normal case
-        4. 'whisperjav' on PATH       -- last resort
+        3. versioned installs         -- ~/Applications/WhisperJav-<version>, newest first
+        4. known venv locations       -- the unversioned install
+        5. 'whisperjav' on PATH       -- last resort
+
+    Each release is installed beside the last (WhisperJav-1.10.0,
+    WhisperJav-1.10.1, ...) so the previous one stays as a fallback; the
+    newest one with a working binary wins, with no code change per release.
+    A release under test can be held back with `whisperjav_bin`.
 
     PATH is deliberately last: on these machines a stale pyenv shim shadows
     the real binary and fails with "pyenv: whisperjav: command not found".
@@ -65,8 +71,11 @@ def find_whisperjav_bin(configured: str = "") -> str:
     if override:
         return os.path.expanduser(override)
 
+    for path in versioned_installs():
+        if os.access(path, os.X_OK):
+            return path
+
     candidates = [
-        "~/Applications/WhisperJav-1.10.0/.venv/bin/whisperjav",
         "~/Applications/WhisperJav/.venv/bin/whisperjav",
         "~/Applications/WhsiperJav/.venv/bin/whisperjav",   # legacy misspelling
         "~/Applications/WhisperJav/.venv/Scripts/whisperjav.exe",
@@ -81,6 +90,25 @@ def find_whisperjav_bin(configured: str = "") -> str:
         return on_path
 
     return os.path.expanduser(candidates[0])
+
+
+_VERSIONED_DIR = re.compile(r"^WhisperJav-(\d+(?:\.\d+)*)$")
+
+
+def versioned_installs(apps_dir: str = "~/Applications") -> list[str]:
+    """`<apps_dir>/WhisperJav-<version>/.venv/bin/whisperjav` that exist, newest version first."""
+    root = Path(os.path.expanduser(apps_dir))
+    found = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        m = _VERSIONED_DIR.match(entry.name)
+        binary = entry / ".venv" / "bin" / "whisperjav"
+        if m and binary.is_file():
+            found.append((tuple(int(p) for p in m.group(1).split(".")), str(binary)))
+    return [path for _, path in sorted(found, reverse=True)]
 
 
 def get_whisperjav_version(binary: str) -> str:
@@ -292,6 +320,8 @@ _OLLAMA_PULL  = re.compile(r"model ['\"]?([^'\"\s]+)['\"]? not found, try pullin
 _IMPORT_ERR   = re.compile(r"^(ModuleNotFoundError|ImportError): (.*)$", re.M)
 _FFMPEG_GONE  = re.compile(r"No such file or directory: 'ffmpeg'|ffmpeg(?: was)? not found", re.I)
 _DISK_FULL    = re.compile(r"No space left on device")
+# WhisperJAV 1.10.1+ (#494): a Qwen3-ASR model that would only write nonsense stops the run with this.
+_QWEN_UNUSABLE = re.compile(r"stopped before transcription: the ASR model (\S+) (.*)")
 
 
 def diagnose_failure(output: str) -> Optional[Diagnosis]:
@@ -386,6 +416,17 @@ def diagnose_failure(output: str) -> Optional[Diagnosis]:
             "agent config points at it.",
             True,
         )
+    m = _QWEN_UNUSABLE.search(output)
+    if m:
+        return Diagnosis(
+            f"Qwen3-ASR model {m.group(1)} unusable on this worker's WhisperJAV",
+            f"whisperjav stopped before transcribing: the ASR model {m.group(1)} {m.group(2).strip()}\n"
+            "WhisperJAV 1.10.1 checks Qwen3-ASR models for an output layer, because a model without one\n"
+            "writes only nonsense (#494).  This depends on the model and the install, not the file, so\n"
+            "every file of the job would stop the same way here.  Check the model in the job's profile\n"
+            "and the WhisperJAV install on this worker.",
+            True,
+        )
     m = _IMPORT_ERR.search(output)
     if m:
         return Diagnosis(
@@ -410,6 +451,22 @@ def diagnose_failure(output: str) -> Optional[Diagnosis]:
             True,
         )
     return None
+
+
+_TRANSLATION_INCOMPLETE = re.compile(r"TRANSLATION INCOMPLETE: (\d+) of (\d+) subtitles not translated")
+
+
+def translation_warning(output: str) -> str:
+    """
+    One line when a successful run's translation left subtitles out, else "".
+
+    WhisperJAV 1.10.1 drops subtitles the model did not translate from the
+    translated file and prints TRANSLATION INCOMPLETE, but still exits 0.
+    The file is published as it is -- most of it is translated -- and the
+    warning travels with the completion so the gap is not silent.
+    """
+    m = _TRANSLATION_INCOMPLETE.search(output or "")
+    return f"translation incomplete: {m.group(1)} of {m.group(2)} subtitles not translated" if m else ""
 
 
 def safe_write(path: Path, text: str) -> bool:

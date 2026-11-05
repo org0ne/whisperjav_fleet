@@ -1011,8 +1011,9 @@ class Agent:
             return
 
         # -- Publish ----------------------------------------------------------
+        warning = runner.translation_warning(output)
         audit_text = runner.build_audit_text(
-            self.version, timestamp, video, cmd_line, elapsed,
+            self.version, timestamp, video, cmd_line, elapsed, warning,
             agent_id=self.agent_id, job_name=job["name"],
         )
         try:
@@ -1027,8 +1028,11 @@ class Agent:
         except OSError:
             pass
 
-        log(f"ok: {srt_out.name} in {runner.format_duration(elapsed)}")
-        self._finish(item_id, "done", "", duration=elapsed)
+        if warning:
+            log(f"ok with warning ({warning}): {srt_out.name} in {runner.format_duration(elapsed)}", "WARN")
+        else:
+            log(f"ok: {srt_out.name} in {runner.format_duration(elapsed)}")
+        self._finish(item_id, "done", warning, duration=elapsed)
 
     def _requeue(self, item_id: int, reason: str) -> None:
         try:
